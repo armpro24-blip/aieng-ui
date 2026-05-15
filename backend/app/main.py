@@ -4,8 +4,10 @@ import json
 import os
 import re
 import shutil
+import sys
 import uuid
 import zipfile
+from collections import Counter
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,8 +16,10 @@ from typing import Any
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+import yaml
 
 from .providers import get_provider
+from . import runtime as _rt
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 PLATFORM_ROOT = APP_ROOT.parent
@@ -250,6 +254,158 @@ def read_package_text(archive: zipfile.ZipFile, member_name: str) -> str | None:
         return None
 
 
+def read_package_yaml(archive: zipfile.ZipFile, member_name: str) -> Any:
+    try:
+        return yaml.safe_load(archive.read(member_name).decode("utf-8", errors="replace"))
+    except KeyError:
+        return None
+
+
+def read_package_json_candidates(archive: zipfile.ZipFile, member_names: tuple[str, ...]) -> Any:
+    for member_name in member_names:
+        value = read_package_json(archive, member_name)
+        if value is not None:
+            return value
+    return None
+
+
+def read_package_yaml_candidates(archive: zipfile.ZipFile, member_names: tuple[str, ...]) -> Any:
+    for member_name in member_names:
+        value = read_package_yaml(archive, member_name)
+        if value is not None:
+            return value
+    return None
+
+
+def package_member_items(value: Any, preferred_keys: tuple[str, ...] = ()) -> list[Any]:
+    if isinstance(value, list):
+        return value
+    if isinstance(value, dict):
+        for key in preferred_keys:
+            candidate = value.get(key)
+            if isinstance(candidate, list):
+                return candidate
+        items = value.get("items")
+        if isinstance(items, list):
+            return items
+    return []
+
+
+def summarize_evidence_items(evidence_index: Any) -> list[dict[str, Any]]:
+    evidence_items = package_member_items(evidence_index, ("evidence_items",))
+    summarized: list[dict[str, Any]] = []
+    for item in evidence_items:
+        if not isinstance(item, dict):
+            continue
+        artifact = item.get("artifact") if isinstance(item.get("artifact"), dict) else {}
+        verification = item.get("verification") if isinstance(item.get("verification"), dict) else {}
+        claim_support = item.get("claim_support") if isinstance(item.get("claim_support"), list) else []
+        summarized.append(
+            {
+                "evidence_id": item.get("evidence_id"),
+                "evidence_type": item.get("evidence_type"),
+                "artifact_path": artifact.get("path"),
+                "artifact_kind": artifact.get("kind"),
+                "verification_status": verification.get("status"),
+                "notes": item.get("notes") or artifact.get("notes") or verification.get("notes"),
+                "claim_support": claim_support,
+            }
+        )
+    return summarized
+
+
+def summarize_cae_payload(
+    *,
+    constraints: Any,
+    parsed_materials: Any,
+    parsed_boundary_conditions: Any,
+    parsed_loads: Any,
+    cae_mapping: Any,
+    evidence_index: Any,
+    validation_status: Any,
+) -> dict[str, Any]:
+    constraint_items = [item for item in package_member_items(constraints, ("constraints",)) if isinstance(item, dict)]
+    material_items = package_member_items(parsed_materials, ("materials",))
+    boundary_condition_items = package_member_items(parsed_boundary_conditions, ("boundary_conditions", "constraints", "bcs"))
+    load_items = package_member_items(parsed_loads, ("loads", "forces"))
+    evidence_items = summarize_evidence_items(evidence_index)
+    result_evidence = [
+        item for item in evidence_items if item.get("evidence_type") in {"solver_result", "mesh_evidence"}
+    ]
+
+    available_fields: list[str] = []
+    for constraint in constraint_items:
+        metric = str(constraint.get("metric") or "").lower()
+        if "stress" in metric and "stress" not in available_fields:
+            available_fields.append("stress")
+        if "displacement" in metric and "displacement" not in available_fields:
+            available_fields.append("displacement")
+
+    solver_mesh_status = validation_status.get("solver_mesh_status", {}) if isinstance(validation_status, dict) else {}
+    if isinstance(solver_mesh_status, dict):
+        if "stress_validation" in solver_mesh_status and "stress" not in available_fields:
+            available_fields.append("stress")
+        if "displacement_validation" in solver_mesh_status and "displacement" not in available_fields:
+            available_fields.append("displacement")
+
+    constraint_type_counts = dict(Counter(str(item.get("type") or "unknown") for item in constraint_items))
+    simulation_targets = [
+        {
+            "id": item.get("id"),
+            "target": item.get("target"),
+            "metric": item.get("metric"),
+            "operator": item.get("operator"),
+            "value": item.get("value"),
+            "reason": item.get("reason"),
+        }
+        for item in constraint_items
+        if item.get("type") == "simulation_target"
+    ]
+    protected_regions = [
+        {
+            "id": item.get("id"),
+            "target": item.get("target"),
+            "type": item.get("type"),
+            "reason": item.get("reason"),
+        }
+        for item in constraint_items
+        if str(item.get("type") or "").startswith("protect") or item.get("type") == "preserve_interface"
+    ]
+
+    present = any(
+        [
+            constraint_items,
+            material_items,
+            boundary_condition_items,
+            load_items,
+            evidence_items,
+            isinstance(cae_mapping, dict) and bool(cae_mapping),
+            isinstance(solver_mesh_status, dict) and bool(solver_mesh_status),
+        ]
+    )
+
+    return {
+        "present": present,
+        "constraints_count": len(constraint_items),
+        "constraint_types": constraint_type_counts,
+        "materials_count": len(material_items),
+        "boundary_conditions_count": len(boundary_condition_items),
+        "loads_count": len(load_items),
+        "evidence_count": len(evidence_items),
+        "result_evidence_count": len(result_evidence),
+        "results_available": bool(result_evidence),
+        "available_fields": available_fields,
+        "simulation_targets": simulation_targets,
+        "protected_regions": protected_regions,
+        "materials": material_items,
+        "boundary_conditions": boundary_condition_items,
+        "loads": load_items,
+        "evidence": evidence_items,
+        "mapping": cae_mapping,
+        "solver_status": solver_mesh_status if isinstance(solver_mesh_status, dict) else {},
+    }
+
+
 def package_summary_fallback(package_path: Path) -> dict[str, Any]:
     with zipfile.ZipFile(package_path) as archive:
         members = sorted(archive.namelist())
@@ -257,13 +413,24 @@ def package_summary_fallback(package_path: Path) -> dict[str, Any]:
         feature_graph = read_package_json(archive, "graph/feature_graph.json")
         topology = read_package_json(archive, "geometry/topology_map.json")
         interfaces = read_package_json(archive, "objects/interface_graph.json")
-        task_spec = read_package_json(archive, "task_spec.json")
-        external_tool_requirements = read_package_json(archive, "external_tool_requirements.json")
+        task_spec = read_package_json_candidates(archive, ("task_spec.json", "task/task_spec.json"))
+        if task_spec is None:
+            task_spec = read_package_yaml_candidates(archive, ("task/task_spec.yaml", "task/task_spec.yml"))
+        external_tool_requirements = read_package_json_candidates(
+            archive,
+            ("external_tool_requirements.json", "task/external_tool_requirements.json"),
+        )
         claim_map = read_package_json(archive, "ai/claim_map.json")
         evidence_index = read_package_json(archive, "results/evidence_index.json")
         tool_trace = read_package_json(archive, "provenance/tool_trace.json")
         completeness_report = read_package_json(archive, "validation/completeness_report.json")
         evidence_report = read_package_json(archive, "validation/evidence_report.json")
+        constraints = read_package_json(archive, "graph/constraints.json")
+        parsed_materials = read_package_json(archive, "simulation/cae_imports/parsed_materials.json")
+        parsed_boundary_conditions = read_package_json(archive, "simulation/cae_imports/parsed_boundary_conditions.json")
+        parsed_loads = read_package_json(archive, "simulation/cae_imports/parsed_loads.json")
+        cae_mapping = read_package_json(archive, "simulation/cae_mapping.json")
+        validation_status = read_package_yaml(archive, "validation/status.yaml")
         ai_summary = read_package_text(archive, "ai/summary.md")
 
     derived: dict[str, Any] = {}
@@ -296,6 +463,7 @@ def package_summary_fallback(package_path: Path) -> dict[str, Any]:
         "feature_graph": feature_graph,
         "topology": topology,
         "interfaces": interfaces,
+        "constraints": constraints,
         "task_spec": task_spec,
         "external_tool_requirements": external_tool_requirements,
         "claim_map": claim_map,
@@ -303,10 +471,80 @@ def package_summary_fallback(package_path: Path) -> dict[str, Any]:
         "tool_trace": tool_trace,
         "completeness_report": completeness_report,
         "evidence_report": evidence_report,
+        "parsed_materials": parsed_materials,
+        "parsed_boundary_conditions": parsed_boundary_conditions,
+        "parsed_loads": parsed_loads,
+        "cae_mapping": cae_mapping,
+        "validation_status": validation_status,
+        "cae": summarize_cae_payload(
+            constraints=constraints,
+            parsed_materials=parsed_materials,
+            parsed_boundary_conditions=parsed_boundary_conditions,
+            parsed_loads=parsed_loads,
+            cae_mapping=cae_mapping,
+            evidence_index=evidence_index,
+            validation_status=validation_status,
+        ),
         "ai_summary": ai_summary,
         "derived": derived,
         "warnings": warnings,
     }
+
+
+def _detect_cae_artifacts(settings: Settings, package_path: Path) -> dict[str, Any] | None:
+    """Import aieng cae_artifact_detector and scan the package.
+
+    Uses temporary sys.path injection so the backend does not need
+    aieng installed as a pip dependency.
+    """
+    aieng_src = settings.aieng_root / "src"
+    if not aieng_src.exists():
+        return None
+    injected = False
+    try:
+        candidate = str(aieng_src)
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            injected = True
+        from aieng.cae_artifact_detector import detect_cae_artifacts
+
+        return detect_cae_artifacts(package_path)
+    except Exception:
+        return None
+    finally:
+        if injected:
+            try:
+                sys.path.remove(candidate)
+            except ValueError:
+                pass
+
+
+def _generate_cae_result_summary(settings: Settings, package_path: Path) -> dict[str, Any] | None:
+    """Import aieng cae_result_summary and generate a summary for the package.
+
+    Uses temporary sys.path injection so the backend does not need
+    aieng installed as a pip dependency.
+    """
+    aieng_src = settings.aieng_root / "src"
+    if not aieng_src.exists():
+        return None
+    injected = False
+    try:
+        candidate = str(aieng_src)
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            injected = True
+        from aieng.cae_result_summary import generate_cae_result_summary
+
+        return generate_cae_result_summary(package_path)
+    except Exception:
+        return None
+    finally:
+        if injected:
+            try:
+                sys.path.remove(candidate)
+            except ValueError:
+                pass
 
 
 def ensure_dirs(settings: Settings) -> None:
@@ -770,6 +1008,7 @@ def package_summary(settings: Settings, project_id: str) -> dict[str, Any]:
         "feature_graph": None,
         "topology": None,
         "interfaces": None,
+        "constraints": None,
         "task_spec": None,
         "external_tool_requirements": None,
         "claim_map": None,
@@ -777,6 +1016,27 @@ def package_summary(settings: Settings, project_id: str) -> dict[str, Any]:
         "tool_trace": None,
         "completeness_report": None,
         "evidence_report": None,
+        "cae": {
+            "present": False,
+            "constraints_count": 0,
+            "constraint_types": {},
+            "materials_count": 0,
+            "boundary_conditions_count": 0,
+            "loads_count": 0,
+            "evidence_count": 0,
+            "result_evidence_count": 0,
+            "results_available": False,
+            "available_fields": [],
+            "simulation_targets": [],
+            "protected_regions": [],
+            "materials": [],
+            "boundary_conditions": [],
+            "loads": [],
+            "evidence": [],
+            "mapping": None,
+            "solver_status": {},
+            "solver_fields": [],
+        },
         "validation": {
             "report_ok": None,
             "messages": [],
@@ -800,6 +1060,7 @@ def package_summary(settings: Settings, project_id: str) -> dict[str, Any]:
             summary["feature_graph"] = result.get("feature_graph")
             summary["topology"] = result.get("topology")
             summary["interfaces"] = result.get("interfaces")
+            summary["constraints"] = result.get("constraints")
             summary["task_spec"] = result.get("task_spec")
             summary["external_tool_requirements"] = result.get("external_tool_requirements")
             summary["claim_map"] = result.get("claim_map")
@@ -807,6 +1068,15 @@ def package_summary(settings: Settings, project_id: str) -> dict[str, Any]:
             summary["tool_trace"] = result.get("tool_trace")
             summary["completeness_report"] = result.get("completeness_report")
             summary["evidence_report"] = result.get("evidence_report")
+            summary["cae"] = result.get("cae") or summarize_cae_payload(
+                constraints=result.get("constraints"),
+                parsed_materials=result.get("parsed_materials"),
+                parsed_boundary_conditions=result.get("parsed_boundary_conditions"),
+                parsed_loads=result.get("parsed_loads"),
+                cae_mapping=result.get("cae_mapping"),
+                evidence_index=result.get("evidence_index"),
+                validation_status=result.get("validation_status"),
+            )
             summary["validation"] = {
                 "report_ok": result.get("validation_report", {}).get("ok"),
                 "messages": result.get("validation_report", {}).get("messages", []),
@@ -844,6 +1114,7 @@ def package_summary(settings: Settings, project_id: str) -> dict[str, Any]:
                 summary["feature_graph"] = fallback["feature_graph"]
                 summary["topology"] = fallback["topology"]
                 summary["interfaces"] = fallback["interfaces"]
+                summary["constraints"] = fallback["constraints"]
                 summary["task_spec"] = fallback["task_spec"]
                 summary["external_tool_requirements"] = fallback["external_tool_requirements"]
                 summary["claim_map"] = fallback["claim_map"]
@@ -851,6 +1122,7 @@ def package_summary(settings: Settings, project_id: str) -> dict[str, Any]:
                 summary["tool_trace"] = fallback["tool_trace"]
                 summary["completeness_report"] = fallback["completeness_report"]
                 summary["evidence_report"] = fallback["evidence_report"]
+                summary["cae"] = fallback["cae"]
                 summary["ai_summary"] = fallback["ai_summary"]
                 summary["derived"] = fallback["derived"]
                 summary["validation"] = {
@@ -869,6 +1141,31 @@ def package_summary(settings: Settings, project_id: str) -> dict[str, Any]:
                     "status": "degraded",
                 }
                 summary["summary_mode"] = "zip_fallback"
+
+    _cae = summary.get("cae")
+    if isinstance(_cae, dict):
+        _field_defaults: dict[str, dict[str, Any]] = {
+            "stress": {"min_value": 0.0, "max_value": 250.0, "unit": "MPa"},
+            "displacement": {"min_value": 0.0, "max_value": 5.0, "unit": "mm"},
+        }
+        _cae["solver_fields"] = [
+            {
+                "field_name": f,
+                "descriptor_url": f"/api/projects/{project_id}/fields/{f}",
+                **_field_defaults.get(f, {"min_value": 0.0, "max_value": 1.0, "unit": ""}),
+                "format": "vertex_synthetic",
+                "available": True,
+            }
+            for f in (_cae.get("available_fields") or [])
+        ]
+        if package_path and package_path.exists():
+            _artifact_detection = _detect_cae_artifacts(settings, package_path)
+            if _artifact_detection is not None:
+                _cae["artifact_detection"] = _artifact_detection
+            _result_summary = _generate_cae_result_summary(settings, package_path)
+            if _result_summary is not None:
+                _cae["result_summary"] = _result_summary
+
     return summary
 
 
@@ -1072,6 +1369,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def get_project_summary(project_id: str) -> dict[str, Any]:
         return package_summary(active_settings, project_id)
 
+    @app.get("/api/projects/{project_id}/cae-artifacts")
+    def get_project_cae_artifacts(project_id: str) -> dict[str, Any]:
+        project = get_project(active_settings, project_id)
+        package_path = resolve_project_path(active_settings, project_id, project.get("aieng_file"))
+        if package_path is None or not package_path.exists():
+            raise HTTPException(status_code=404, detail=".aieng package not found")
+        result = _detect_cae_artifacts(active_settings, package_path)
+        if result is None:
+            raise HTTPException(status_code=503, detail="aieng detector unavailable")
+        return result
+
+    @app.get("/api/projects/{project_id}/cae-result-summary")
+    def get_project_cae_result_summary(project_id: str) -> dict[str, Any]:
+        project = get_project(active_settings, project_id)
+        package_path = resolve_project_path(active_settings, project_id, project.get("aieng_file"))
+        if package_path is None or not package_path.exists():
+            raise HTTPException(status_code=404, detail=".aieng package not found")
+        result = _generate_cae_result_summary(active_settings, package_path)
+        if result is None:
+            raise HTTPException(status_code=503, detail="aieng summarizer unavailable")
+        return result
+
     @app.post("/api/projects/{project_id}/import-aieng")
     def import_project(project_id: str) -> dict[str, Any]:
         result = import_aieng_file(active_settings, project_id)
@@ -1112,6 +1431,333 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/projects/{project_id}/chat")
     def chat(project_id: str, payload: dict[str, Any] = Body(default=None)) -> dict[str, Any]:
         return chat_orchestrator(active_settings, project_id, payload or {})
+
+    @app.get("/api/projects/{project_id}/fields/{field_name}")
+    def get_field_descriptor(project_id: str, field_name: str) -> dict[str, Any]:
+        get_project(active_settings, project_id)
+        _known: dict[str, dict[str, Any]] = {
+            "stress": {"min_value": 0.0, "max_value": 250.0, "unit": "MPa", "colormap": "thermal"},
+            "displacement": {"min_value": 0.0, "max_value": 5.0, "unit": "mm", "colormap": "coolwarm"},
+        }
+        meta = _known.get(field_name, {"min_value": 0.0, "max_value": 1.0, "unit": "", "colormap": "thermal"})
+        return {
+            "field_name": field_name,
+            "project_id": project_id,
+            "format": "vertex_synthetic",
+            "basis": "y_normalized",
+            "min_value": meta["min_value"],
+            "max_value": meta["max_value"],
+            "unit": meta["unit"],
+            "colormap": meta["colormap"],
+            "source": "synthetic_mock",
+        }
+
+    # ── runtime tool registrations ────────────────────────────────────────────
+    # Each closure captures active_settings so tool handlers call existing
+    # business-logic functions without duplicating them.
+
+    def _tool_inspect_package(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        pid = inp.get("project_id")
+        if not pid:
+            raise ValueError("project_id is required for aieng.inspect_package")
+        return package_summary(active_settings, pid)
+
+    def _tool_refresh_semantics(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        pid = inp.get("project_id")
+        if not pid:
+            raise ValueError("project_id is required for aieng.refresh_semantics")
+        return validate_aieng_file(active_settings, pid)
+
+    def _tool_generate_preview(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        pid = inp.get("project_id")
+        if not pid:
+            raise ValueError("project_id is required for aieng.generate_preview")
+        return convert_asset(active_settings, pid)
+
+    def _tool_read_audit_log(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        pid = inp.get("project_id")
+        logs = recent_logs(active_settings, pid) if pid else []
+        return {"project_id": pid, "recent_logs": logs}
+
+    def _tool_freecad_inspect_geometry(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import freecad_bridge
+
+        # Resolve input file: explicit path → package path → project source_step
+        input_path: str | None = inp.get("inputPath") or inp.get("input_path")
+        if not input_path:
+            pid = inp.get("project_id")
+            if pid:
+                proj = read_json(metadata_path(active_settings, pid))
+                if proj:
+                    rel = proj.get("source_step")
+                    if rel:
+                        input_path = str(project_dir(active_settings, pid) / rel)
+
+        if not input_path:
+            return {
+                "status": "error",
+                "code": "missing_input",
+                "message": (
+                    "No input file provided. Pass inputPath or a project_id "
+                    "that has an uploaded STEP file."
+                ),
+            }
+
+        from pathlib import Path as _Path
+        if not _Path(input_path).exists():
+            return {
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Input file not found: {input_path}",
+            }
+
+        return freecad_bridge.inspect_geometry(
+            input_path,
+            freecad_cmd=active_settings.freecad_cmd,
+            freecad_mcp_root=active_settings.freecad_mcp_root,
+        )
+
+    def _tool_freecad_export_step(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import freecad_bridge
+        from pathlib import Path as _Path
+
+        # Resolve input file: explicit path → project source_step
+        input_path: str | None = inp.get("inputPath") or inp.get("input_path")
+        if not input_path:
+            pid = inp.get("project_id")
+            if pid:
+                proj = read_json(metadata_path(active_settings, pid))
+                if proj:
+                    rel = proj.get("source_step")
+                    if rel:
+                        input_path = str(project_dir(active_settings, pid) / rel)
+
+        if not input_path:
+            return {
+                "status": "error",
+                "code": "missing_input",
+                "message": (
+                    "No input file provided. Pass inputPath or a project_id "
+                    "that has an uploaded STEP file."
+                ),
+            }
+
+        if not _Path(input_path).exists():
+            return {
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Input file not found: {input_path}",
+            }
+
+        # Resolve output path; never overwrite the source (append _export suffix)
+        output_path: str | None = inp.get("outputPath") or inp.get("output_path")
+        if not output_path:
+            in_p = _Path(input_path)
+            output_path = str(in_p.with_stem(in_p.stem + "_export").with_suffix(".step"))
+
+        result = freecad_bridge.export_step(
+            input_path,
+            output_path,
+            freecad_cmd=active_settings.freecad_cmd,
+            freecad_mcp_root=active_settings.freecad_mcp_root,
+        )
+
+        # Per-project audit for artifact changes
+        pid = inp.get("project_id")
+        if pid and isinstance(result, dict) and result.get("artifacts"):
+            try:
+                write_audit_log(active_settings, pid, "freecad_export", {
+                    "tool": "freecad.export_step",
+                    "inputPath": input_path,
+                    "outputPath": output_path,
+                    "status": result.get("status"),
+                    "artifacts": result.get("artifacts", []),
+                })
+            except Exception:
+                pass
+
+        return result
+
+    def _tool_freecad_run_macro(_inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        # The execute_run() approval gate should prevent this from being called.
+        # This body is a defensive belt-and-suspenders guard.
+        raise RuntimeError(
+            "freecad.run_macro reached execution without approval — approval gate bypassed"
+        )
+
+    _rt.register_tool(
+        "aieng.inspect_package",
+        _tool_inspect_package,
+        description="Inspect .aieng package and return full project semantic summary",
+    )
+    _rt.register_tool(
+        "aieng.refresh_semantics",
+        _tool_refresh_semantics,
+        description="Re-validate package and refresh semantic state",
+    )
+    _rt.register_tool(
+        "aieng.generate_preview",
+        _tool_generate_preview,
+        description="Generate 3-D web preview asset (GLB or STL)",
+    )
+    _rt.register_tool(
+        "aieng.read_audit_log",
+        _tool_read_audit_log,
+        description="Return the most recent audit log entries for this project",
+    )
+    _rt.register_tool(
+        "freecad.inspect_geometry",
+        _tool_freecad_inspect_geometry,
+        description="Inspect CAD geometry via FreeCADCmd: face/edge/vertex counts, bounding box, volume",
+    )
+    _rt.register_tool(
+        "freecad.export_step",
+        _tool_freecad_export_step,
+        description="Export CAD geometry to STEP format via FreeCADCmd; returns artifact refs",
+    )
+    _rt.register_tool(
+        "freecad.run_macro",
+        _tool_freecad_run_macro,
+        requires_approval=True,
+        description="Run a FreeCAD macro (requires explicit approval; potentially destructive)",
+    )
+
+    # Configure file-backed run persistence
+    _rt.configure(
+        Path(
+            os.environ.get(
+                "AIENG_RUNTIME_STATE_DIR",
+                str(active_settings.data_root / "runtime" / "runs"),
+            )
+        )
+    )
+
+    # ── runtime endpoints ─────────────────────────────────────────────────────
+
+    @app.get("/api/runtime/tools")
+    def list_runtime_tools() -> list[dict[str, Any]]:
+        return _rt.registered_tools_info()
+
+    @app.get("/api/runtime/runs")
+    def list_runtime_runs() -> list[dict[str, Any]]:
+        runs = _rt.get_all_runs(limit=50)
+        return [_rt.run_to_summary_dict(r) for r in runs]
+
+    @app.post("/api/runtime/runs")
+    def create_runtime_run(payload: dict[str, Any] = Body(default=None)) -> dict[str, Any]:
+        data = payload or {}
+        run = _rt.RunRecord(
+            run_id=uuid.uuid4().hex[:12],
+            message=str(data.get("message") or "").strip(),
+            created_at=now_iso(),
+            status="pending",
+            project_id=data.get("project_id") or None,
+            package_path=data.get("package_path") or None,
+        )
+        _rt.execute_run(run, {"project_id": run.project_id})
+        all_artifacts = [
+            a for tr in run.tool_results for a in tr.artifacts
+        ]
+        audit_payload: dict[str, Any] = {
+            "kind": "runtime_run",
+            "run_id": run.run_id,
+            "message": run.message,
+            "project_id": run.project_id,
+            "tools": [tc.name for tc in run.tool_calls],
+            "status": run.status,
+            "errors": run.errors,
+            "created_at": run.created_at,
+            "artifacts": all_artifacts,
+        }
+        if run.project_id:
+            try:
+                write_audit_log(active_settings, run.project_id, "runtime_run", audit_payload)
+            except Exception:
+                pass
+        return _rt.run_to_dict(run)
+
+    @app.get("/api/runtime/runs/{run_id}")
+    def get_runtime_run(run_id: str) -> dict[str, Any]:
+        run = _rt.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return _rt.run_to_dict(run)
+
+    @app.get("/api/runtime/runs/{run_id}/events")
+    def get_runtime_run_events(run_id: str) -> list[dict[str, Any]]:
+        run = _rt.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        return [
+            {
+                "id": e.id,
+                "run_id": e.run_id,
+                "type": e.type,
+                "timestamp": e.timestamp,
+                "payload": e.payload,
+            }
+            for e in run.events
+        ]
+
+    @app.post("/api/runtime/runs/{run_id}/approve")
+    def approve_runtime_run(run_id: str) -> dict[str, Any]:
+        run = _rt.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        if run.status != "awaiting_approval":
+            raise HTTPException(
+                status_code=409,
+                detail=f"run is not awaiting approval (current status: {run.status})",
+            )
+        run = _rt.resume_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found after resume")
+        if run.project_id:
+            try:
+                write_audit_log(
+                    active_settings,
+                    run.project_id,
+                    "runtime_run",
+                    {
+                        "kind": "runtime_run_approved",
+                        "run_id": run.run_id,
+                        "status": run.status,
+                        "created_at": now_iso(),
+                    },
+                )
+            except Exception:
+                pass
+        return _rt.run_to_dict(run)
+
+    @app.post("/api/runtime/runs/{run_id}/reject")
+    def reject_runtime_run(run_id: str) -> dict[str, Any]:
+        run = _rt.get_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found")
+        if run.status != "awaiting_approval":
+            raise HTTPException(
+                status_code=409,
+                detail=f"run is not awaiting approval (current status: {run.status})",
+            )
+        run = _rt.reject_run(run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="run not found after reject")
+        if run.project_id:
+            try:
+                write_audit_log(
+                    active_settings,
+                    run.project_id,
+                    "runtime_run",
+                    {
+                        "kind": "runtime_run_rejected",
+                        "run_id": run.run_id,
+                        "status": run.status,
+                        "created_at": now_iso(),
+                    },
+                )
+            except Exception:
+                pass
+        return _rt.run_to_dict(run)
 
     return app
 

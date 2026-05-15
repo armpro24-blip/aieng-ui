@@ -5,7 +5,17 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 
 import { api } from "./api";
-import type { ChatResponse, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot } from "./types";
+import type { ChatResponse, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeRun, SolverFieldDescriptor } from "./types";
+
+// Status labels for runtime runs
+function runtimeStatusLabel(status: RuntimeRun["status"]): string {
+  if (status === "completed") return "已完成";
+  if (status === "awaiting_approval") return "等待审批";
+  if (status === "failed") return "执行失败";
+  if (status === "rejected") return "已拒绝";
+  if (status === "cancelled") return "已取消";
+  return status;
+}
 
 type StageState = "idle" | "active" | "done" | "error";
 
@@ -22,6 +32,17 @@ type Notice = {
   detail: string;
 };
 
+type ChatHistoryItem = {
+  id: string;
+  role: "user" | "assistant";
+  body: string;
+  createdAt: string;
+  mode?: "plan" | "execute" | "runtime";
+  plan?: ChatResponse["plan"];
+  errors?: string[];
+  auditLogUrl?: string | null;
+};
+
 type ViewerLoadState = "idle" | "loading" | "ready" | "error";
 
 const BASE_STAGES: StageItem[] = [
@@ -32,6 +53,11 @@ const BASE_STAGES: StageItem[] = [
 ];
 
 const CAD_PROVIDER_OPTIONS = [{ value: "freecad", label: "FreeCAD" }] as const;
+const CHAT_SUGGESTIONS = [
+  "总结当前模型的语义状态和主要风险",
+  "检查当前包是否已经具备执行 patch 的前提",
+  "给出减重但不破坏受保护区域的安全步骤",
+] as const;
 
 function jsonBlock(value: unknown) {
   return JSON.stringify(value ?? null, null, 2);
@@ -69,6 +95,97 @@ function getRuntimeDetail(snapshot: RuntimeConfigSnapshot | null) {
   return snapshot.probe.issues.join("；") || snapshot.probe.bridge_error || "运行时检测未通过";
 }
 
+function createChatId() {
+  return `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function fieldLabel(field: string) {
+  if (field === "stress") return "Von Mises Stress";
+  if (field === "displacement") return "Displacement Magnitude";
+  return field;
+}
+
+function caeModeLabel(mode: string) {
+  if (mode === "cad_only") return "CAD-only";
+  if (mode === "cae_setup") return "CAE setup";
+  if (mode === "cae_result") return "CAE result (external solver-output)";
+  if (mode === "cae_validation") return "CAE validation / review";
+  return mode;
+}
+
+function caeModeClass(mode: string) {
+  if (mode === "cad_only") return "mode-cad-only";
+  if (mode === "cae_setup") return "mode-cae-setup";
+  if (mode === "cae_result") return "mode-cae-result";
+  if (mode === "cae_validation") return "mode-cae-validation";
+  return "";
+}
+
+function formatRecordSummary(record: Record<string, unknown>) {
+  return Object.entries(record)
+    .filter(([, value]) => value != null && value !== "")
+    .slice(0, 3)
+    .map(([key, value]) => `${key}: ${String(value)}`)
+    .join(" / ");
+}
+
+function summarizeAssistantReply(response: ChatResponse, mode: "plan" | "execute") {
+  const prefix = mode === "execute" ? "已执行编排请求。" : "已生成编排计划。";
+  return `${prefix} ${response.reply}`;
+}
+
+function runtimeRunToChatPlan(run: RuntimeRun): ChatResponse["plan"] {
+  return run.plan.map((step) => {
+    const tc = run.tool_calls.find((c) => c.name === step.name);
+    const tr = tc ? run.tool_results.find((r) => r.id === tc.id) : undefined;
+    const status =
+      tr?.status === "success"
+        ? "done"
+        : tr?.status === "needs_approval"
+          ? "needs_approval"
+          : tr?.status === "error"
+            ? "failed"
+            : "pending";
+    return {
+      tool: step.name,
+      description: step.description,
+      status,
+      inputs: typeof step.input === "object" && step.input !== null ? (step.input as Record<string, unknown>) : {},
+      output: tr?.output as Record<string, unknown> | null ?? null,
+    };
+  });
+}
+
+function formatGeometryResult(output: Record<string, unknown>): string {
+  if (!output || output.status === "error") {
+    const code = output?.code ?? "error";
+    const msg = output?.message ?? "Geometry inspection failed.";
+    return `几何检查失败 [${code}]: ${msg}`;
+  }
+  const bb = output.bounding_box as Record<string, number> | undefined;
+  const dims = bb
+    ? `${bb.xlen?.toFixed(1)} × ${bb.ylen?.toFixed(1)} × ${bb.zlen?.toFixed(1)} mm`
+    : "—";
+  const vol = typeof output.total_volume_mm3 === "number"
+    ? `${(output.total_volume_mm3 / 1000).toFixed(2)} cm³`
+    : "—";
+  const faces = output.total_face_count ?? "—";
+  const solids = output.total_solid_count ?? "—";
+  const ver = output.freecad_version ? ` (FreeCAD ${output.freecad_version})` : "";
+  return `几何检查完成${ver} — 外形尺寸 ${dims}，体积 ${vol}，${solids} 个实体，${faces} 个面`;
+}
+
+function formatArtifactChanges(run: import("./types").RuntimeRun): string | null {
+  const allArtifacts = run.tool_results.flatMap((tr) => tr.artifacts ?? []);
+  if (allArtifacts.length === 0) return null;
+  const paths = allArtifacts
+    .filter((a): a is Record<string, unknown> => typeof a === "object" && a !== null)
+    .map((a) => String(a.path ?? ""))
+    .filter(Boolean);
+  if (paths.length === 0) return null;
+  return "变更文件:\n" + paths.map((p) => `  - ${p}`).join("\n");
+}
+
 function projectViewerUrl(project: ProjectRecord | null) {
   if (!project?.id || !project?.web_asset) return null;
   return `/assets/projects/${project.id}/${project.web_asset}`;
@@ -87,6 +204,51 @@ function withAssetVersion(assetUrl?: string | null, version?: string | null) {
   if (!assetUrl || !version) return assetUrl ?? null;
   const separator = assetUrl.includes("?") ? "&" : "?";
   return `${assetUrl}${separator}v=${encodeURIComponent(version)}`;
+}
+
+function sampleColormap(t: number, name?: string | null): THREE.Color {
+  const c = Math.max(0, Math.min(1, t));
+  if (name === "coolwarm") {
+    // blue(0) -> white(0.5) -> red(1)
+    const r = c < 0.5 ? 0.2 + c * 1.6 : 1.0;
+    const g = c < 0.5 ? 0.2 + c * 1.6 : 1.0 - (c - 0.5) * 2.0;
+    const b = c < 0.5 ? 1.0 : 1.0 - (c - 0.5) * 1.6;
+    return new THREE.Color(r, g, b);
+  }
+  // thermal: blue -> cyan -> green -> yellow -> red
+  const r = Math.max(0, Math.min(1, 1.5 - Math.abs(4 * c - 3)));
+  const g = Math.max(0, Math.min(1, 1.5 - Math.abs(4 * c - 2)));
+  const b = Math.max(0, Math.min(1, 1.5 - Math.abs(4 * c - 1)));
+  return new THREE.Color(r, g, b);
+}
+
+function applyYNormalizedColors(object: THREE.Object3D, colormap?: string | null): boolean {
+  let applied = false;
+  object.traverse((node) => {
+    if (!(node instanceof THREE.Mesh)) return;
+    const geo = node.geometry as THREE.BufferGeometry;
+    const pos = geo.attributes.position;
+    if (!pos) return;
+    let yMin = Infinity;
+    let yMax = -Infinity;
+    for (let i = 0; i < pos.count; i++) {
+      const y = pos.getY(i);
+      if (y < yMin) yMin = y;
+      if (y > yMax) yMax = y;
+    }
+    const yRange = yMax > yMin ? yMax - yMin : 1;
+    const colors = new Float32Array(pos.count * 3);
+    for (let i = 0; i < pos.count; i++) {
+      const col = sampleColormap((pos.getY(i) - yMin) / yRange, colormap);
+      colors[i * 3] = col.r;
+      colors[i * 3 + 1] = col.g;
+      colors[i * 3 + 2] = col.b;
+    }
+    geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    node.material = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.1, roughness: 0.65 });
+    applied = true;
+  });
+  return applied;
 }
 
 function fitCameraToObject(
@@ -114,7 +276,15 @@ function fitCameraToObject(
   return true;
 }
 
-function ModelViewer({ assetUrl, assetFormat }: { assetUrl?: string | null; assetFormat?: string | null }) {
+function ModelViewer({
+  assetUrl,
+  assetFormat,
+  fieldDescriptor,
+}: {
+  assetUrl?: string | null;
+  assetFormat?: string | null;
+  fieldDescriptor?: SolverFieldDescriptor | null;
+}) {
   const hostRef = useRef<HTMLDivElement | null>(null);
   const [viewerState, setViewerState] = useState<{ status: ViewerLoadState; detail: string }>({
     status: "idle",
@@ -168,12 +338,16 @@ function ModelViewer({ assetUrl, assetFormat }: { assetUrl?: string | null; asse
     const attachObject = (nextObject: THREE.Object3D) => {
       if (object3d) scene.remove(object3d);
       object3d = nextObject;
+      if (fieldDescriptor?.basis === "y_normalized") {
+        applyYNormalizedColors(nextObject, fieldDescriptor.colormap);
+      }
       scene.add(nextObject);
       if (!fitCameraToObject(camera, controls, nextObject)) {
         setSafeViewerState("error", "预览资产缺少可用的几何边界，无法定位相机");
         return;
       }
-      setSafeViewerState("ready", "真实预览资产已加载");
+      const fieldNote = fieldDescriptor ? ` · ${fieldLabel(fieldDescriptor.field_name)} overlay` : "";
+      setSafeViewerState("ready", `真实预览资产已加载${fieldNote}`);
     };
 
     if (assetUrl && resolvedFormat) {
@@ -244,7 +418,7 @@ function ModelViewer({ assetUrl, assetFormat }: { assetUrl?: string | null; asse
       renderer.dispose();
       host.innerHTML = "";
     };
-  }, [assetFormat, assetUrl]);
+  }, [assetFormat, assetUrl, fieldDescriptor]);
 
   return (
     <div className="viewer-canvas-shell">
@@ -450,10 +624,15 @@ export default function App() {
   const [projectName, setProjectName] = useState("STEP 工作台项目");
   const [message, setMessage] = useState("上传当前 STEP，导入 aieng，生成预览，并刷新语义信息");
   const [chat, setChat] = useState<ChatResponse | null>(null);
+  const [chatHistory, setChatHistory] = useState<ChatHistoryItem[]>([]);
   const [busy, setBusy] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File | null>(null);
   const [notice, setNotice] = useState<Notice | null>(null);
   const [stages, setStages] = useState<StageItem[]>(BASE_STAGES);
+  const [selectedCaeField, setSelectedCaeField] = useState("stress");
+  const [fieldDescriptor, setFieldDescriptor] = useState<SolverFieldDescriptor | null>(null);
+  const [lastRuntimeRun, setLastRuntimeRun] = useState<RuntimeRun | null>(null);
+  const chatLogRef = useRef<HTMLDivElement | null>(null);
 
   const selectedProject = useMemo(
     () => projects.find((item) => item.id === selectedId) ?? null,
@@ -682,6 +861,158 @@ export default function App() {
     members: summary?.members ?? [],
     viewer: (summary as any)?.viewer ?? null,
   });
+  const caeSummary = summary?.cae ?? null;
+  const caeFields = caeSummary?.available_fields ?? [];
+  const hasCaeContext = caeSummary?.present ?? false;
+
+  useEffect(() => {
+    if (!caeFields.length) return;
+    if (!caeFields.includes(selectedCaeField)) {
+      setSelectedCaeField(caeFields[0]);
+    }
+  }, [caeFields, selectedCaeField]);
+
+  useEffect(() => {
+    if (!selectedId || !hasCaeContext) {
+      setFieldDescriptor(null);
+      return;
+    }
+    let cancelled = false;
+    void api.getFieldDescriptor(selectedId, selectedCaeField)
+      .then((desc) => { if (!cancelled) setFieldDescriptor(desc); })
+      .catch(() => { if (!cancelled) setFieldDescriptor(null); });
+    return () => { cancelled = true; };
+  }, [selectedId, selectedCaeField, hasCaeContext]);
+
+  useEffect(() => {
+    setChatHistory([]);
+  }, [selectedId]);
+
+  useEffect(() => {
+    if (!chatLogRef.current) return;
+    chatLogRef.current.scrollTop = chatLogRef.current.scrollHeight;
+  }, [chatHistory]);
+
+  function appendRunToChatHistory(run: RuntimeRun) {
+    const statusLabel = runtimeStatusLabel(run.status);
+    // If a geometry inspection tool completed, produce a human-readable summary line
+    const geoResult = run.tool_results.find(
+      (tr) =>
+        tr.status === "success" &&
+        run.tool_calls.find((tc) => tc.id === tr.id && tc.name === "freecad.inspect_geometry")
+    );
+    const geoLine =
+      geoResult && typeof geoResult.output === "object" && geoResult.output !== null
+        ? formatGeometryResult(geoResult.output as Record<string, unknown>)
+        : null;
+    const artifactLine = formatArtifactChanges(run);
+    const body = geoLine
+      ? `[本地运行时] ${statusLabel} — ${geoLine}${artifactLine ? "\n" + artifactLine : ""}`
+      : run.summary
+        ? `[本地运行时] ${statusLabel} — ${run.summary}${artifactLine ? "\n" + artifactLine : ""}`
+        : `[本地运行时] ${statusLabel}${artifactLine ? "\n" + artifactLine : ""}`;
+    setChatHistory((current) => [
+      ...current,
+      {
+        id: createChatId(),
+        role: "assistant",
+        body,
+        createdAt: new Date().toISOString(),
+        mode: "runtime",
+        plan: runtimeRunToChatPlan(run),
+        errors: run.errors,
+        auditLogUrl: null,
+      },
+    ]);
+  }
+
+  async function submitRuntime() {
+    const prompt = message.trim();
+    if (!prompt) {
+      setNotice({ tone: "info", title: "请输入请求", detail: "本地运行时需要一条自然语言指令。" });
+      return;
+    }
+    setChatHistory((current) => [
+      ...current,
+      { id: createChatId(), role: "user", body: prompt, createdAt: new Date().toISOString(), mode: "runtime" },
+    ]);
+    await runBusyTask(async () => {
+      const run = await api.startRun(prompt, selectedId ?? null);
+      setLastRuntimeRun(run);
+      appendRunToChatHistory(run);
+      const statusLabel = runtimeStatusLabel(run.status);
+      setNotice({
+        tone: run.status === "completed" ? "success" : run.status === "awaiting_approval" ? "info" : "error",
+        title: `本地运行时 — ${statusLabel}`,
+        detail: run.summary || run.errors[0] || "",
+      });
+    });
+  }
+
+  async function approveRun() {
+    if (!lastRuntimeRun || lastRuntimeRun.status !== "awaiting_approval") return;
+    await runBusyTask(async () => {
+      const run = await api.approveRun(lastRuntimeRun.run_id);
+      setLastRuntimeRun(run);
+      appendRunToChatHistory(run);
+      const statusLabel = runtimeStatusLabel(run.status);
+      setNotice({
+        tone: run.status === "completed" ? "success" : "error",
+        title: `运行时审批 — ${statusLabel}`,
+        detail: run.summary || run.errors[0] || "已批准并执行",
+      });
+    });
+  }
+
+  async function rejectRun() {
+    if (!lastRuntimeRun || lastRuntimeRun.status !== "awaiting_approval") return;
+    await runBusyTask(async () => {
+      const run = await api.rejectRun(lastRuntimeRun.run_id);
+      setLastRuntimeRun(run);
+      appendRunToChatHistory(run);
+      setNotice({ tone: "info", title: "运行时审批 — 已拒绝", detail: "已拒绝，待执行工具未运行。" });
+    });
+  }
+
+  async function submitChat(mode: "plan" | "execute") {
+    if (!selectedId) return;
+    const prompt = message.trim();
+    if (!prompt) {
+      setNotice({ tone: "info", title: "请输入编排请求", detail: "聊天窗需要一条自然语言指令才能生成计划或执行。" });
+      return;
+    }
+
+    setChatHistory((current) => [
+      ...current,
+      { id: createChatId(), role: "user", body: prompt, createdAt: new Date().toISOString(), mode },
+    ]);
+
+    await runBusyTask(async () => {
+      const result = await api.chat(selectedId, prompt, mode === "execute");
+      setChat(result);
+      if (mode === "execute") {
+        await refreshProjects(selectedId);
+      }
+      setChatHistory((current) => [
+        ...current,
+        {
+          id: createChatId(),
+          role: "assistant",
+          body: summarizeAssistantReply(result, mode),
+          createdAt: new Date().toISOString(),
+          mode,
+          plan: result.plan,
+          errors: result.errors,
+          auditLogUrl: result.audit_log_url ?? null,
+        },
+      ]);
+      setNotice({
+        tone: mode === "execute" ? "success" : "info",
+        title: mode === "execute" ? "已执行安全步骤" : "已生成计划",
+        detail: mode === "execute" ? "聊天窗已执行当前请求允许的后端步骤。" : "聊天窗已生成一组可审阅的受保护步骤。",
+      });
+    });
+  }
 
   return (
     <>
@@ -732,7 +1063,7 @@ export default function App() {
               </div>
               <div className="viewer-stage-badge">{effectiveViewerUrl ? "预览可用" : "等待生成"}</div>
             </div>
-            <ModelViewer assetUrl={effectiveViewerUrl} assetFormat={effectiveViewerFormat} />
+            <ModelViewer assetUrl={effectiveViewerUrl} assetFormat={effectiveViewerFormat} fieldDescriptor={fieldDescriptor} />
           </div>
 
           <div className="viewer-insights">
@@ -939,63 +1270,298 @@ export default function App() {
             <JsonDisclosure title="查看集成与预览元数据" body={integrationBody} />
           </section>
 
+          {summary ? (
+            <section className="card">
+              <div className="section-heading">
+                <div>
+                  <h2>CAE Artifact Status</h2>
+                  <p>Honest artifact detection — no solver is executed here.</p>
+                </div>
+              </div>
+
+              {caeSummary?.artifact_detection ? (
+                <>
+                  <div className={`cae-mode-badge ${caeModeClass(caeSummary.artifact_detection.mode)}`}>
+                    {caeModeLabel(caeSummary.artifact_detection.mode)}
+                  </div>
+                  <div className="cae-artifact-grid">
+                    {Object.entries(caeSummary.artifact_detection.artifacts).map(([path, present]) => (
+                      <div key={path} className={`cae-artifact-item ${present ? "present" : "missing"}`}>
+                        <span className="cae-artifact-icon">{present ? "✓" : "✗"}</span>
+                        <span className="cae-artifact-path">{path}</span>
+                      </div>
+                    ))}
+                  </div>
+                  <div className="cae-artifact-footer">
+                    Detected {caeSummary.artifact_detection.detected_count} / {caeSummary.artifact_detection.total_count} artifacts.
+                    Solver execution remains in external CAD/CAE software.
+                  </div>
+                  {caeSummary?.result_summary ? (
+                    <div className="summary-note" style={{ marginTop: 10 }}>
+                      <strong>Post-processing Summary</strong>
+                      <p>{caeSummary.result_summary.llm_summary.one_line}</p>
+                      {caeSummary.result_summary.source.solver !== "external_or_unknown" ? (
+                        <small>Solver: {caeSummary.result_summary.source.solver}</small>
+                      ) : null}
+                      {caeSummary.result_summary.source.software ? (
+                        <small> | Software: {caeSummary.result_summary.source.software}</small>
+                      ) : null}
+                      {caeSummary.result_summary.load_cases.length > 0 ? (
+                        <div style={{ marginTop: 6 }}>
+                          <small><strong>Load cases ({caeSummary.result_summary.load_cases.length}):</strong></small>
+                          <ul style={{ margin: "4px 0", paddingLeft: 16 }}>
+                            {caeSummary.result_summary.load_cases.map((lc) => (
+                              <li key={lc.id}>
+                                <small>{lc.name} ({lc.type}){lc.magnitude != null ? ` — ${lc.magnitude}${lc.unit ? ` ${lc.unit}` : ""}` : ""}</small>
+                              </li>
+                            ))}
+                          </ul>
+                        </div>
+                      ) : null}
+                      {caeSummary.result_summary.solver_settings ? (
+                        <div style={{ marginTop: 6 }}>
+                          <small><strong>Solver settings:</strong> {caeSummary.result_summary.solver_settings.solver_type ?? "unknown"}{caeSummary.result_summary.solver_settings.analysis_type ? ` / ${caeSummary.result_summary.solver_settings.analysis_type}` : ""}</small>
+                        </div>
+                      ) : null}
+                      {caeSummary.result_summary.field_metadata && caeSummary.result_summary.field_metadata.count > 0 ? (
+                        <div style={{ marginTop: 6 }}>
+                          <small><strong>Field metadata:</strong> {caeSummary.result_summary.field_metadata.count} field(s) registered{caeSummary.result_summary.field_metadata.format ? ` (${caeSummary.result_summary.field_metadata.format})` : ""}</small>
+                        </div>
+                      ) : null}
+                      {caeSummary.result_summary.llm_summary.limitations.length ? (
+                        <div style={{ marginTop: 6 }}>
+                          <small>
+                            Limitations: {caeSummary.result_summary.llm_summary.limitations.join(" ")}
+                          </small>
+                        </div>
+                      ) : null}
+                    </div>
+                  ) : null}
+                </>
+              ) : (
+                <div className="summary-note summary-muted">
+                  <strong>Artifact detector unavailable</strong>
+                  <p>Install or configure aieng to enable CAE artifact scanning.</p>
+                </div>
+              )}
+
+              {hasCaeContext ? (
+                <>
+                  <div className="cae-overview-grid" style={{ marginTop: 14 }}>
+                    <div><span>约束</span><strong>{caeSummary?.constraints_count ?? 0}</strong></div>
+                    <div><span>载荷</span><strong>{caeSummary?.loads_count ?? 0}</strong></div>
+                    <div><span>边界条件</span><strong>{caeSummary?.boundary_conditions_count ?? 0}</strong></div>
+                    <div><span>结果证据</span><strong>{caeSummary?.result_evidence_count ?? 0}</strong></div>
+                  </div>
+
+                  <div className={caeSummary?.results_available ? "summary-note summary-primary" : "summary-note summary-muted"}>
+                    <strong>{caeSummary?.results_available ? "已检测到 CAE 结果证据" : "仅检测到 CAE 上下文"}</strong>
+                    <p>
+                      {caeSummary?.results_available
+                        ? "当前项目包含可用于后续 CAE 可视层的结果证据。此版先把字段、证据和约束整理进 UI，便于继续接入真正的 field renderer。"
+                        : "当前项目包含分析目标、约束或外部 CAE 交接信息，但还没有可渲染的求解结果。UI 会优雅降级，不阻断现有 CAD 预览。"}
+                    </p>
+                  </div>
+
+                  {caeFields.length ? (
+                    <div className="cae-field-shell">
+                      <div className="cae-field-head">
+                        <div>
+                          <strong>Scalar Field</strong>
+                          <span>{caeSummary?.results_available ? "结果层已具备接线位" : "结果层等待外部求解写回"}</span>
+                        </div>
+                        <select value={selectedCaeField} onChange={(event) => setSelectedCaeField(event.target.value)}>
+                          {caeFields.map((field) => (
+                            <option key={field} value={field}>
+                              {fieldLabel(field)}
+                            </option>
+                          ))}
+                        </select>
+                      </div>
+                      <div className={caeSummary?.results_available ? "cae-legend ready" : "cae-legend pending"} />
+                      <div className="cae-legend-scale">
+                        <span>{fieldDescriptor ? `${fieldDescriptor.min_value} ${fieldDescriptor.unit ?? ""}`.trim() : "Low"}</span>
+                        <strong>{fieldLabel(selectedCaeField)}</strong>
+                        <span>{fieldDescriptor ? `${fieldDescriptor.max_value} ${fieldDescriptor.unit ?? ""}`.trim() : "High"}</span>
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {caeSummary?.simulation_targets?.length ? (
+                    <div className="cae-section-block">
+                      <strong>Simulation Targets</strong>
+                      <div className="cae-chip-list">
+                        {caeSummary.simulation_targets.map((target, index) => (
+                          <div key={`${String(target.id ?? index)}`} className="cae-chip-card">
+                            <span>{String(target.metric ?? target.target ?? "simulation_target")}</span>
+                            <strong>
+                              {String(target.operator ?? "")}
+                              {target.value != null ? ` ${String(target.value)}` : ""}
+                            </strong>
+                            <small>{String(target.reason ?? "")}</small>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {caeSummary?.protected_regions?.length ? (
+                    <div className="cae-section-block">
+                      <strong>Fixtures / Protected Regions</strong>
+                      <div className="cae-list">
+                        {caeSummary.protected_regions.map((item, index) => (
+                          <div key={`${String(item.id ?? index)}`} className="cae-list-item">
+                            <span>{String(item.target ?? item.id ?? "protected_region")}</span>
+                            <strong>{String(item.type ?? "constraint")}</strong>
+                            <small>{String(item.reason ?? "")}</small>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {caeSummary?.loads?.length ? (
+                    <div className="cae-section-block">
+                      <strong>Loads</strong>
+                      <div className="cae-list">
+                        {caeSummary.loads.map((item, index) => (
+                          <div key={`${String((item as Record<string, unknown>).id ?? index)}`} className="cae-list-item compact">
+                            <span>{formatRecordSummary(item as Record<string, unknown>) || `load_${index + 1}`}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {caeSummary?.boundary_conditions?.length ? (
+                    <div className="cae-section-block">
+                      <strong>Boundary Conditions</strong>
+                      <div className="cae-list">
+                        {caeSummary.boundary_conditions.map((item, index) => (
+                          <div key={`${String((item as Record<string, unknown>).id ?? index)}`} className="cae-list-item compact">
+                            <span>{formatRecordSummary(item as Record<string, unknown>) || `bc_${index + 1}`}</span>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {caeSummary?.evidence?.length ? (
+                    <div className="cae-section-block">
+                      <strong>Evidence Ledger</strong>
+                      <div className="cae-list">
+                        {caeSummary.evidence.map((item, index) => {
+                          const record = item as Record<string, unknown>;
+                          return (
+                            <div key={`${String(record.evidence_id ?? index)}`} className="cae-list-item">
+                              <span>{String(record.evidence_type ?? "evidence")}</span>
+                              <strong>{String(record.verification_status ?? "unknown")}</strong>
+                              <small>{String(record.artifact_path ?? record.notes ?? "")}</small>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    </div>
+                  ) : null}
+                </>
+              ) : null}
+            </section>
+          ) : null}
+
           <section className="card">
             <div className="section-heading">
               <div>
                 <h2>智能编排</h2>
-                <p>通过自然语言生成安全步骤，必要时再展开查看原始执行结果。</p>
+                <p>把现有的 plan/execute API 收拢成真正的聊天窗，保留会话上下文、步骤回显和审计入口。</p>
               </div>
             </div>
 
-            <textarea rows={4} value={message} onChange={(event) => setMessage(event.target.value)} />
+            <div className="chat-suggestion-row">
+              {CHAT_SUGGESTIONS.map((suggestion) => (
+                <button key={suggestion} type="button" className="ghost-button chat-suggestion" onClick={() => setMessage(suggestion)}>
+                  {suggestion}
+                </button>
+              ))}
+            </div>
+
+            <div className="chat-window" ref={chatLogRef}>
+              {chatHistory.length ? (
+                chatHistory.map((entry) => (
+                  <article key={entry.id} className={entry.role === "assistant" ? "chat-bubble assistant" : "chat-bubble user"}>
+                    <header>
+                      <strong>{entry.role === "assistant" ? "Workbench" : "You"}</strong>
+                      <span>{entry.mode === "execute" ? "执行" : entry.mode === "plan" ? "计划" : entry.mode === "runtime" ? "运行时" : ""}</span>
+                    </header>
+                    <p>{entry.body}</p>
+                    {entry.plan?.length ? (
+                      <div className="chat-plan-list">
+                        {entry.plan.map((step, index) => (
+                          <div key={`${step.tool}-${index}`} className={`chat-plan-item status-${step.status === "failed" ? "error" : step.status === "done" ? "done" : "active"}`}>
+                            <strong>{step.tool}</strong>
+                            <span>{step.description}</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : null}
+                    {entry.errors?.length ? (
+                      <div className="chat-error-list">
+                        {entry.errors.map((error, index) => (
+                          <small key={`${entry.id}-error-${index}`}>{error}</small>
+                        ))}
+                      </div>
+                    ) : null}
+                    {entry.auditLogUrl ? (
+                      <a className="chat-audit-link" href={entry.auditLogUrl} target="_blank" rel="noreferrer">
+                        查看审计日志
+                      </a>
+                    ) : null}
+                  </article>
+                ))
+              ) : (
+                <div className="summary-note summary-muted chat-empty-state">
+                  <strong>聊天窗已就绪</strong>
+                  <p>这里会保留你的请求、编排回复、步骤状态和审计入口，不再只显示一次性的 plan 结果。</p>
+                </div>
+              )}
+            </div>
+
+            <textarea rows={4} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="例如：总结当前模型并给出下一步可执行的安全操作。" />
             <div className="action-row">
-              <button
-                disabled={!selectedId || busy}
-                onClick={() =>
-                  selectedId &&
-                  void runBusyTask(async () => {
-                    const result = await api.chat(selectedId, message, false);
-                    setChat(result);
-                    setNotice({ tone: "info", title: "已生成计划", detail: "可在下方查看 orchestrator 给出的安全步骤。" });
-                  })
-                }
-              >
-                生成计划
+              <button disabled={!selectedId || busy} onClick={() => void submitChat("plan")}>
+                发送并生成计划
               </button>
-              <button
-                disabled={!selectedId || busy}
-                onClick={() =>
-                  selectedId &&
-                  void runBusyTask(async () => {
-                    const result = await api.chat(selectedId, message, true);
-                    setChat(result);
-                    await refreshProjects(selectedId);
-                    setNotice({ tone: "success", title: "已执行安全步骤", detail: "工作台已根据自然语言请求执行可用后端步骤。" });
-                  })
-                }
-              >
-                执行安全步骤
+              <button disabled={!selectedId || busy} onClick={() => void submitChat("execute")}>
+                发送并执行安全步骤
+              </button>
+              <button disabled={busy} onClick={() => void submitRuntime()}>
+                发送到本地运行时
               </button>
             </div>
+
+            {lastRuntimeRun?.status === "awaiting_approval" ? (
+              <div className="action-row approval-action-row">
+                <span className="approval-label">
+                  等待审批 — {lastRuntimeRun.plan[lastRuntimeRun.pending_step_index ?? 0]?.name ?? "tool"}
+                </span>
+                <button disabled={busy} onClick={() => void approveRun()}>
+                  批准执行
+                </button>
+                <button disabled={busy} className="ghost-button" onClick={() => void rejectRun()}>
+                  拒绝
+                </button>
+              </div>
+            ) : null}
 
             {chat ? (
               <>
-                <div className="summary-note chat-reply">
-                  <strong>{chat.executed ? "编排执行结果" : "编排计划已生成"}</strong>
-                  <p>{chat.reply}</p>
-                </div>
                 <div className="chat-meta">
                   <span>计划步骤 {chat.plan.length}</span>
                   <span>审计 ID {chat.audit_id}</span>
+                  <span>{chat.executed ? "已执行" : "仅计划"}</span>
                 </div>
                 <JsonDisclosure title="查看原始计划与执行输出" body={jsonBlock(chat)} />
               </>
-            ) : (
-              <div className="summary-note summary-muted">
-                <strong>智能编排尚未运行</strong>
-                <p>选择项目后可先生成计划，再决定是否执行安全步骤。</p>
-              </div>
-            )}
+            ) : null}
           </section>
         </aside>
       </div>

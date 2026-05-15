@@ -277,6 +277,11 @@ BRIDGE_RUNNER_SOURCE = textwrap.dedent(
         completeness = tool_get_completeness_report(package_path)
         evidence_report = tool_get_evidence_report(package_path)
         feature_graph = _read_json_member(package_path, "graph/feature_graph.json")
+        constraints = _read_json_member(package_path, "graph/constraints.json")
+        parsed_materials = _read_json_member(package_path, "simulation/cae_imports/parsed_materials.json")
+        parsed_boundary_conditions = _read_json_member(package_path, "simulation/cae_imports/parsed_boundary_conditions.json")
+        parsed_loads = _read_json_member(package_path, "simulation/cae_imports/parsed_loads.json")
+        cae_mapping = _read_json_member(package_path, "simulation/cae_mapping.json")
         ai_summary = _read_text_member(package_path, "ai/summary.md")
 
         return {
@@ -286,6 +291,7 @@ BRIDGE_RUNNER_SOURCE = textwrap.dedent(
             "feature_graph": feature_graph,
             "topology": topology,
             "interfaces": interfaces,
+            "constraints": constraints,
             "task_spec": task_spec,
             "external_tool_requirements": external_tools,
             "claim_map": claim_map,
@@ -293,6 +299,10 @@ BRIDGE_RUNNER_SOURCE = textwrap.dedent(
             "tool_trace": tool_trace,
             "completeness_report": completeness,
             "evidence_report": evidence_report,
+            "parsed_materials": parsed_materials,
+            "parsed_boundary_conditions": parsed_boundary_conditions,
+            "parsed_loads": parsed_loads,
+            "cae_mapping": cae_mapping,
             "validation_status": validation_status,
             "validation_report": validation,
             "ai_summary": ai_summary,

@@ -1,4 +1,4 @@
-import type { ChatResponse, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot } from "./types";
+import type { CaeArtifactDetection, ChatResponse, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeEvent, RuntimeRun, RuntimeRunSummary, RuntimeToolInfo, SolverFieldDescriptor } from "./types";
 
 const API = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 
@@ -60,4 +60,22 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message, execute }),
     }),
+  getFieldDescriptor: (projectId: string, fieldName: string) =>
+    request<SolverFieldDescriptor>(`/api/projects/${projectId}/fields/${fieldName}`),
+  listRuns: () => request<RuntimeRunSummary[]>("/api/runtime/runs"),
+  startRun: (message: string, projectId?: string | null) =>
+    request<RuntimeRun>("/api/runtime/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message, project_id: projectId ?? null }),
+    }),
+  getRun: (runId: string) => request<RuntimeRun>(`/api/runtime/runs/${runId}`),
+  getRunEvents: (runId: string) => request<RuntimeEvent[]>(`/api/runtime/runs/${runId}/events`),
+  approveRun: (runId: string) =>
+    request<RuntimeRun>(`/api/runtime/runs/${runId}/approve`, { method: "POST" }),
+  rejectRun: (runId: string) =>
+    request<RuntimeRun>(`/api/runtime/runs/${runId}/reject`, { method: "POST" }),
+  listTools: () => request<RuntimeToolInfo[]>("/api/runtime/tools"),
+  getCaeArtifacts: (projectId: string) =>
+    request<CaeArtifactDetection>(`/api/projects/${projectId}/cae-artifacts`),
 };
