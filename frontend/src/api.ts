@@ -1,4 +1,4 @@
-import type { ChatResponse, ProjectRecord, ProjectSummary } from "./types";
+import type { ChatResponse, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot } from "./types";
 
 const API = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 
@@ -20,7 +20,20 @@ async function request<T>(path: string, init?: RequestInit): Promise<T> {
 
 export const api = {
   base: API,
-  runtime: () => request<Record<string, unknown>>("/api/runtime"),
+  runtime: () => request<RuntimeConfigSnapshot>("/api/runtime"),
+  getRuntimeConfig: () => request<RuntimeConfigSnapshot>("/api/runtime-config"),
+  updateRuntimeConfig: (payload: RuntimeConfig) =>
+    request<RuntimeConfigSnapshot>("/api/runtime-config", {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  testRuntimeConfig: (payload: RuntimeConfig) =>
+    request<RuntimeConfigSnapshot>("/api/runtime-config/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
   listProjects: () => request<ProjectRecord[]>("/api/projects"),
   createProject: (name: string) =>
     request<ProjectRecord>("/api/projects", {

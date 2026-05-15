@@ -26,12 +26,14 @@ body {
 
 button,
 input,
+select,
 textarea {
   font: inherit;
 }
 
 button,
 input,
+select,
 textarea {
   border-radius: 12px;
   border: 1px solid #334155;
@@ -46,6 +48,7 @@ textarea {
 }
 
 input:focus,
+select:focus,
 textarea:focus {
   outline: none;
   border-color: #38bdf8;
@@ -124,6 +127,39 @@ button:disabled {
   font-weight: 600;
   letter-spacing: 0.02em;
   white-space: nowrap;
+}
+
+.runtime-cluster {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 8px;
+}
+
+.runtime-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.runtime-note {
+  color: #9eb1cf;
+  font-size: 12px;
+  text-align: right;
+  max-width: 360px;
+}
+
+.ghost-button {
+  background: rgba(8, 15, 30, 0.92);
+  border-color: rgba(96, 165, 250, 0.34);
+  color: #dbeafe;
+  box-shadow: none;
+}
+
+.ghost-button:hover:not(:disabled) {
+  background: rgba(15, 23, 42, 0.96);
 }
 
 .viewer-canvas {
@@ -439,6 +475,91 @@ input[type="file"] {
   font-size: 13px;
 }
 
+.runtime-config-grid,
+.runtime-probe-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.runtime-probe-grid {
+  margin-top: 14px;
+}
+
+.form-field {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+
+.form-field span {
+  color: #8ea4c5;
+  font-size: 12px;
+}
+
+.runtime-config-span {
+  grid-column: 1 / -1;
+}
+
+.runtime-config-actions {
+  margin-top: 14px;
+}
+
+.drawer-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: flex;
+  justify-content: flex-end;
+  padding: 24px;
+  background: rgba(2, 6, 23, 0.56);
+  backdrop-filter: blur(8px);
+}
+
+.settings-drawer {
+  width: min(540px, 100%);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  border-radius: 24px;
+  border: 1px solid rgba(71, 85, 105, 0.42);
+  background:
+    linear-gradient(180deg, rgba(15, 23, 42, 0.98), rgba(6, 10, 21, 0.99));
+  box-shadow:
+    0 24px 60px rgba(2, 6, 23, 0.45),
+    inset 0 1px 0 rgba(148, 163, 184, 0.06);
+  overflow: hidden;
+}
+
+.drawer-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 16px;
+  padding: 20px 22px 16px;
+  border-bottom: 1px solid rgba(51, 65, 85, 0.45);
+}
+
+.drawer-header h2 {
+  margin: 0 0 8px;
+}
+
+.drawer-header p {
+  margin: 0;
+  color: #91a3c2;
+  line-height: 1.5;
+  font-size: 13px;
+}
+
+.drawer-close {
+  white-space: nowrap;
+}
+
+.drawer-body {
+  overflow: auto;
+  padding: 18px 22px 22px;
+}
+
 .dropzone {
   position: relative;
   display: block;
@@ -606,6 +727,16 @@ input[type="file"] {
   color: #d8e4f6;
 }
 
+.summary-primary {
+  border-color: rgba(34, 211, 238, 0.3);
+  background: rgba(8, 47, 73, 0.28);
+}
+
+.summary-muted {
+  border-color: rgba(71, 85, 105, 0.3);
+  background: rgba(9, 17, 30, 0.46);
+}
+
 .semantic-block + .semantic-block {
   margin-top: 14px;
 }
@@ -613,6 +744,51 @@ input[type="file"] {
 .semantic-block h3 {
   margin: 0 0 10px;
   font-size: 14px;
+}
+
+.fold-block {
+  margin-top: 12px;
+  border-radius: 14px;
+  border: 1px solid rgba(71, 85, 105, 0.35);
+  background: rgba(5, 10, 22, 0.5);
+  overflow: hidden;
+}
+
+.fold-summary {
+  cursor: pointer;
+  list-style: none;
+  padding: 14px 16px;
+  color: #dce8fb;
+  font-size: 13px;
+  font-weight: 600;
+}
+
+.fold-summary::-webkit-details-marker {
+  display: none;
+}
+
+.fold-block[open] .fold-summary {
+  border-bottom: 1px solid rgba(51, 65, 85, 0.45);
+}
+
+.fold-block .json-block {
+  margin: 0;
+  border: 0;
+  border-radius: 0;
+  max-height: 260px;
+}
+
+.chat-reply {
+  margin-bottom: 0;
+}
+
+.chat-meta {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 10px;
+  margin-top: 12px;
+  color: #9eb1cf;
+  font-size: 12px;
 }
 
 @media (max-width: 1280px) {
@@ -632,7 +808,9 @@ input[type="file"] {
   .viewer-insights,
   .project-metadata,
   .semantic-overview,
-  .action-grid {
+  .action-grid,
+  .runtime-config-grid,
+  .runtime-probe-grid {
     grid-template-columns: 1fr;
   }
 
@@ -642,6 +820,26 @@ input[type="file"] {
   }
 
   .viewer-stage-head {
+    flex-direction: column;
+  }
+
+  .runtime-actions,
+  .runtime-note {
+    justify-content: flex-start;
+    text-align: left;
+  }
+
+  .drawer-backdrop {
+    padding: 0;
+  }
+
+  .settings-drawer {
+    width: 100%;
+    height: 100dvh;
+    border-radius: 0;
+  }
+
+  .drawer-header {
     flex-direction: column;
   }
 }

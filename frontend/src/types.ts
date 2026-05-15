@@ -11,6 +11,42 @@
   last_error?: string | null;
 };
 
+export type RuntimeConfig = {
+  provider: string;
+  aieng_root: string;
+  freecad_mcp_root: string;
+  freecad_home: string;
+  topology_backend: "auto" | "mock" | "occ" | string;
+};
+
+export type RuntimeProbe = {
+  provider: string;
+  topology_backend_requested: string;
+  topology_backend_resolved: string;
+  aieng_root: string;
+  aieng_src_exists: boolean;
+  freecad_mcp_root: string;
+  freecad_mcp_src_exists: boolean;
+  freecad_home: string;
+  freecad_cmd: string;
+  freecad_python: string;
+  freecad_cmd_exists: boolean;
+  freecad_python_exists: boolean;
+  ready: boolean;
+  issues: string[];
+  bridge?: Record<string, unknown>;
+  bridge_error?: string;
+  whitelisted_tools?: string[];
+};
+
+export type RuntimeConfigSnapshot = {
+  config: RuntimeConfig;
+  defaults: RuntimeConfig;
+  probe: RuntimeProbe;
+  config_path: string;
+  persisted_exists: boolean;
+};
+
 export type ProjectSummary = {
   project: ProjectRecord;
   files?: Record<string, unknown>;
@@ -25,7 +61,7 @@ export type ProjectSummary = {
   derived?: Record<string, unknown>;
   summary_error?: string | null;
   summary_mode?: string | null;
-  integration?: Record<string, unknown>;
+  integration?: RuntimeConfigSnapshot | Record<string, unknown>;
 };
 
 export type ChatStep = {
