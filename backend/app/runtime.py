@@ -308,6 +308,15 @@ _INTENT_MAP: list[tuple[list[str], str, str]] = [
         "freecad.run_macro",
         "Run a FreeCAD macro (requires explicit approval)",
     ),
+    (
+        [
+            "computed metrics", "generate computed metrics", "import computed metrics",
+            "create computed_metrics.json", "normalize postprocessing metrics",
+            "计算指标", "生成计算指标", "归一化指标",
+        ],
+        "postprocess.generate_computed_metrics",
+        "Normalize external post-processing metrics into computed_metrics.json",
+    ),
 ]
 
 
@@ -444,11 +453,24 @@ def execute_run(run: RunRecord, ctx: dict[str, Any]) -> RunRecord:
     """
     Synchronously execute all planned steps, emitting RuntimeEvents along the way.
     Stops at the first failure or approval gate.
+
+    ``ctx`` may contain ``tool_input`` — a dict of structured parameters that is
+    merged into each plan step's input. This lets callers pass explicit
+    ``inputPath``, ``outputPath``, etc. without parsing them from the message.
     """
     run.status = "running"
     _emit(run, "run_started", {"message": run.message})
 
     plan = build_plan(run.message, run.project_id)
+    # Merge structured tool_input into each step so handlers receive explicit params
+    tool_input = ctx.get("tool_input")
+    if isinstance(tool_input, dict):
+        for step in plan:
+            step_input = step.get("input") or {}
+            if isinstance(step_input, dict):
+                merged = dict(step_input)
+                merged.update(tool_input)
+                step["input"] = merged
     run.plan = plan
     _emit(run, "plan_created", {"steps": [s["name"] for s in plan]})
 

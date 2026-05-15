@@ -1131,3 +1131,55 @@ def test_runtime_plan_selects_export_intent(tmp_path: Path) -> None:
         assert plan[0]["name"] == "freecad.export_step", (
             f"Expected freecad.export_step for {msg!r}, got {plan[0]['name']}"
         )
+
+
+def test_runtime_plan_selects_computed_metrics_intent(tmp_path: Path) -> None:
+    """'generate computed metrics' routes to postprocess.generate_computed_metrics."""
+    from app.runtime import build_plan
+
+    for msg in ["generate computed metrics", "import computed metrics", "归一化指标"]:
+        plan = build_plan(msg, None)
+        assert len(plan) == 1, f"Expected 1 step for {msg!r}, got {plan}"
+        assert plan[0]["name"] == "postprocess.generate_computed_metrics", (
+            f"Expected postprocess.generate_computed_metrics for {msg!r}, got {plan[0]['name']}"
+        )
+
+
+def test_runtime_tool_input_merged_into_step_input(tmp_path: Path) -> None:
+    """Structured tool_input from ctx is merged into each plan step."""
+    called: list[dict] = []
+
+    def capture_tool(inp: dict, ctx: dict) -> dict:
+        called.append(inp)
+        return {"status": "ok"}
+
+    _rt.register_tool("test.capture", capture_tool)
+    try:
+        original_build = _rt.build_plan
+        _rt.build_plan = lambda msg, pid: [{"name": "test.capture", "description": "capture", "input": {"base": 1}}]
+        try:
+            run = _rt.RunRecord(
+                run_id="ti001",
+                message="capture test",
+                created_at="2026-01-01T00:00:00+00:00",
+                status="pending",
+            )
+            _rt._STORE.pop("ti001", None)
+            result = _rt.execute_run(run, {"tool_input": {"extra": 2}})
+        finally:
+            _rt.build_plan = original_build
+
+        assert result.status == "completed"
+        assert called[0]["base"] == 1
+        assert called[0]["extra"] == 2
+    finally:
+        _rt._REGISTRY.pop("test.capture", None)
+        _rt._STORE.pop("ti001", None)
+
+
+def test_generate_computed_metrics_tool_registered(tmp_path: Path) -> None:
+    """The runtime tool registry includes postprocess.generate_computed_metrics."""
+    from app.runtime import registered_tools_info
+
+    names = [t["name"] for t in registered_tools_info()]
+    assert "postprocess.generate_computed_metrics" in names

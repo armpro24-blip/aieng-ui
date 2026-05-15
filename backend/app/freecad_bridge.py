@@ -92,3 +92,51 @@ def export_step(
         ) from exc
 
     return run_step_export(input_path, output_path, freecad_cmd, timeout=timeout)
+
+
+def export_computed_metrics(
+    input_path: str | Path,
+    output_path: str | Path,
+    *,
+    freecad_mcp_root: str | Path,
+    load_case_id: str = "load_case_001",
+    software: str | None = None,
+    source_files: list[str] | None = None,
+) -> dict[str, Any]:
+    """Normalize external metrics into ``computed_metrics.json``.
+
+    Imports ``freecad_mcp.computed_metrics_exporter.export_computed_metrics``
+    from ``freecad_mcp_root/src``. No FreeCAD or solver is required.
+
+    Args:
+        input_path: Path to input JSON or CSV with raw metrics.
+        output_path: Destination path for ``computed_metrics.json``.
+        freecad_mcp_root: Root of the aieng_freecad_mcp repo checkout.
+        load_case_id: Load case identifier written into the output.
+        software: Name of the software that produced the original metrics.
+        source_files: Original solver result files the metrics were derived from.
+
+    Returns:
+        The normalized ``computed_metrics`` dict.
+    """
+    src_path = str(Path(freecad_mcp_root) / "src")
+    _load_src(freecad_mcp_root)
+
+    try:
+        from freecad_mcp.computed_metrics_exporter import (  # type: ignore[import]
+            export_computed_metrics as _export_computed_metrics,
+        )
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Cannot import freecad_mcp.computed_metrics_exporter from {src_path!r}. "
+            f"Ensure aieng_freecad_mcp is checked out at {freecad_mcp_root!r}. "
+            f"Detail: {exc}"
+        ) from exc
+
+    return _export_computed_metrics(
+        input_path,
+        output_path,
+        load_case_id=load_case_id,
+        software=software,
+        source_files=source_files or [],
+    )

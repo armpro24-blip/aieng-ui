@@ -1578,6 +1578,77 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return result
 
+    def _tool_generate_computed_metrics(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import freecad_bridge
+        from pathlib import Path as _Path
+
+        input_path: str | None = inp.get("inputPath") or inp.get("input_path")
+        output_path: str | None = inp.get("outputPath") or inp.get("output_path")
+        project_id: str | None = inp.get("project_id")
+
+        # Resolve output path: explicit → project workspace results/
+        if not output_path and project_id:
+            pkg = resolve_project_path(active_settings, project_id, project.get("aieng_file"))
+            if pkg is not None and pkg.exists():
+                # Write into the same directory as the .aieng package
+                output_path = str(pkg.parent / "results" / "computed_metrics.json")
+            else:
+                # Fallback to project directory
+                output_path = str(
+                    project_dir(active_settings, project_id) / "results" / "computed_metrics.json"
+                )
+
+        if not output_path:
+            return {
+                "status": "error",
+                "code": "missing_computed_metrics_output_path",
+                "message": (
+                    "No output path provided and no project_id could be resolved. "
+                    "Pass outputPath or a project_id."
+                ),
+            }
+
+        if not input_path:
+            return {
+                "status": "error",
+                "code": "missing_input",
+                "message": "No input file provided. Pass inputPath.",
+            }
+
+        if not _Path(input_path).exists():
+            return {
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Input file not found: {input_path}",
+            }
+
+        result = freecad_bridge.export_computed_metrics(
+            input_path,
+            output_path,
+            freecad_mcp_root=active_settings.freecad_mcp_root,
+            load_case_id=inp.get("loadCaseId") or inp.get("load_case_id") or "load_case_001",
+            software=inp.get("software"),
+            source_files=inp.get("sourceFiles") or inp.get("source_files") or [],
+        )
+
+        # Normalize to a runtime-friendly dict with artifacts
+        return {
+            "status": "ok",
+            "output_path": output_path,
+            "schema_version": result.get("schema_version"),
+            "metrics_count": sum(
+                len(lc.get("metrics", {})) for lc in result.get("load_cases", [])
+            ),
+            "artifacts": [
+                {
+                    "path": output_path,
+                    "kind": "computed_metrics",
+                    "role": "external_postprocessing_metrics",
+                }
+            ],
+            "warnings": result.get("warnings", []),
+        }
+
     def _tool_freecad_run_macro(_inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
         # The execute_run() approval gate should prevent this from being called.
         # This body is a defensive belt-and-suspenders guard.
@@ -1614,6 +1685,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "freecad.export_step",
         _tool_freecad_export_step,
         description="Export CAD geometry to STEP format via FreeCADCmd; returns artifact refs",
+    )
+    _rt.register_tool(
+        "postprocess.generate_computed_metrics",
+        _tool_generate_computed_metrics,
+        description="Normalize external post-processing metrics into computed_metrics.json",
     )
     _rt.register_tool(
         "freecad.run_macro",
@@ -1654,7 +1730,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             project_id=data.get("project_id") or None,
             package_path=data.get("package_path") or None,
         )
-        _rt.execute_run(run, {"project_id": run.project_id})
+        ctx: dict[str, Any] = {"project_id": run.project_id}
+        if "tool_input" in data and isinstance(data["tool_input"], dict):
+            ctx["tool_input"] = data["tool_input"]
+        _rt.execute_run(run, ctx)
         all_artifacts = [
             a for tr in run.tool_results for a in tr.artifacts
         ]
