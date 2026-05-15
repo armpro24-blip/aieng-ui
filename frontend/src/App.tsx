@@ -632,6 +632,7 @@ export default function App() {
   const [selectedCaeField, setSelectedCaeField] = useState("stress");
   const [fieldDescriptor, setFieldDescriptor] = useState<SolverFieldDescriptor | null>(null);
   const [lastRuntimeRun, setLastRuntimeRun] = useState<RuntimeRun | null>(null);
+  const [caeRefreshing, setCaeRefreshing] = useState(false);
   const chatLogRef = useRef<HTMLDivElement | null>(null);
 
   const selectedProject = useMemo(
@@ -947,6 +948,39 @@ export default function App() {
         detail: run.summary || run.errors[0] || "",
       });
     });
+  }
+
+  async function refreshCaeSummary() {
+    if (!selectedId || caeRefreshing) return;
+    setCaeRefreshing(true);
+    setNotice(null);
+    try {
+      const run = await api.startRun("refresh cae summary", selectedId, {
+        project_id: selectedId,
+        overwrite: true,
+      });
+      setLastRuntimeRun(run);
+      appendRunToChatHistory(run);
+      if (run.status === "completed") {
+        await refreshProjects(selectedId);
+        setNotice({
+          tone: "success",
+          title: "CAE 摘要已刷新",
+          detail: run.summary || "已重新生成 CAE 结果摘要、证据索引和 Markdown 文件。",
+        });
+      } else {
+        setNotice({
+          tone: "error",
+          title: "CAE 摘要刷新失败",
+          detail: run.errors[0] || run.summary || "运行时返回非成功状态。",
+        });
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setNotice({ tone: "error", title: "CAE 摘要刷新失败", detail });
+    } finally {
+      setCaeRefreshing(false);
+    }
   }
 
   async function approveRun() {
@@ -1295,6 +1329,17 @@ export default function App() {
                   <div className="cae-artifact-footer">
                     Detected {caeSummary.artifact_detection.detected_count} / {caeSummary.artifact_detection.total_count} artifacts.
                     Solver execution remains in external CAD/CAE software.
+                  </div>
+                  <div className="action-row" style={{ marginTop: 10 }}>
+                    <button
+                      disabled={caeRefreshing || !selectedId}
+                      onClick={() => void refreshCaeSummary()}
+                    >
+                      {caeRefreshing ? "正在刷新 CAE 摘要…" : "刷新 CAE 摘要"}
+                    </button>
+                    <span className="summary-muted" style={{ fontSize: 12 }}>
+                      重新生成 .aieng CAE 摘要/证据文件（不执行求解器）
+                    </span>
                   </div>
                   {caeSummary?.result_summary ? (
                     <div className="summary-note" style={{ marginTop: 10 }}>

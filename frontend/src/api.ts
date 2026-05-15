@@ -63,11 +63,15 @@ export const api = {
   getFieldDescriptor: (projectId: string, fieldName: string) =>
     request<SolverFieldDescriptor>(`/api/projects/${projectId}/fields/${fieldName}`),
   listRuns: () => request<RuntimeRunSummary[]>("/api/runtime/runs"),
-  startRun: (message: string, projectId?: string | null) =>
+  startRun: (message: string, projectId?: string | null, toolInput?: Record<string, unknown> | null) =>
     request<RuntimeRun>("/api/runtime/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message, project_id: projectId ?? null }),
+      body: JSON.stringify({
+        message,
+        project_id: projectId ?? null,
+        ...(toolInput ? { tool_input: toolInput } : {}),
+      }),
     }),
   getRun: (runId: string) => request<RuntimeRun>(`/api/runtime/runs/${runId}`),
   getRunEvents: (runId: string) => request<RuntimeEvent[]>(`/api/runtime/runs/${runId}/events`),

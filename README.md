@@ -7,11 +7,11 @@ Web workbench and FastAPI service for the `.aieng` engineering platform.
 `aieng-ui` provides:
 
 - **FastAPI service layer** — project/file management, preview generation, semantic package inspection, CAE artifact detection (`GET /api/projects/{project_id}/cae-artifacts`)
-- **React SPA** — STEP upload, Three.js viewer (GLB/STL), semantic summary panel, honest CAE artifact status panel, chat/orchestration panel, audit log, settings drawer
+- **React SPA** — STEP upload, Three.js viewer (GLB/STL), semantic summary panel, honest CAE artifact status panel with one-click CAE summary refresh, chat/orchestration panel, audit log, settings drawer
 - **Local orchestration runtime** — `RunRecord`, `ToolCall`, `ToolResult`, `RuntimeEvent` types; intent-based plan builder; synchronous executor with approval gate
 - **CAD provider registry** — pluggable `CadProvider` interface; FreeCAD is the first implementation
 
-Seven registered tools (6 working + 1 skeleton):
+Nine registered runtime tools (7 working + 2 skeleton):
 
 | Tool | Status |
 |------|--------|
@@ -21,6 +21,8 @@ Seven registered tools (6 working + 1 skeleton):
 | `aieng.read_audit_log` | Working |
 | `freecad.inspect_geometry` | Working — FreeCADCmd bridge |
 | `freecad.export_step` | Working — FreeCADCmd bridge; writes `{stem}_export.step` |
+| `postprocess.generate_computed_metrics` | Working — normalizes external metrics into `computed_metrics.json` |
+| `postprocess.refresh_cae_summary` | Working — regenerates CAE result summary, evidence index, and markdown |
 | `freecad.run_macro` | Skeleton, approval-gated |
 
 External agents (Claude Code, Codex, custom MCP clients) can access all runtime tools via the MCP bridge in `aieng_freecad_mcp`. See [`../docs/runtime_and_agents.md`](../docs/runtime_and_agents.md).
