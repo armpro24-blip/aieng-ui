@@ -71,4 +71,5 @@ vite.svg
 
 # Runtime data
 data/projects/
+data/runtime/
 !data/.gitkeep
