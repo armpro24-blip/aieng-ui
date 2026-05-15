@@ -1183,3 +1183,51 @@ def test_generate_computed_metrics_tool_registered(tmp_path: Path) -> None:
 
     names = [t["name"] for t in registered_tools_info()]
     assert "postprocess.generate_computed_metrics" in names
+
+
+def test_refresh_cae_summary_tool_registered(tmp_path: Path) -> None:
+    """The runtime tool registry includes postprocess.refresh_cae_summary."""
+    from app.runtime import registered_tools_info
+
+    names = [t["name"] for t in registered_tools_info()]
+    assert "postprocess.refresh_cae_summary" in names
+
+
+def test_runtime_plan_selects_refresh_cae_summary_intent(tmp_path: Path) -> None:
+    """'refresh cae summary' includes postprocess.refresh_cae_summary in plan."""
+    from app.runtime import build_plan
+
+    for msg in ["refresh cae summary", "update postprocessing summary", "刷新cae摘要"]:
+        plan = build_plan(msg, None)
+        names = [s["name"] for s in plan]
+        assert "postprocess.refresh_cae_summary" in names, (
+            f"Expected postprocess.refresh_cae_summary in plan for {msg!r}, got {names}"
+        )
+
+
+def test_refresh_cae_summary_missing_package_path_returns_error(tmp_path: Path) -> None:
+    """refresh_cae_summary returns structured error when no package path can be resolved."""
+    settings = _make_runtime_settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    original_build = _rt.build_plan
+    _rt.build_plan = lambda msg, pid: [
+        {"name": "postprocess.refresh_cae_summary", "description": "refresh", "input": {}}
+    ]
+    try:
+        resp = client.post("/api/runtime/runs", json={
+            "message": "refresh cae summary",
+            "tool_input": {},
+        })
+        assert resp.status_code == 200
+        run = resp.json()
+        # Runtime treats handler returns without exception as success;
+        # the error is encoded in the tool result output.
+        assert run["status"] == "completed"
+        results = run["tool_results"]
+        assert any(
+            r.get("output", {}).get("code") == "missing_cae_summary_package_path"
+            for r in results
+        )
+    finally:
+        _rt.build_plan = original_build

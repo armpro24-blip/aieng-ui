@@ -272,7 +272,7 @@ _INTENT_MAP: list[tuple[list[str], str, str]] = [
         "Inspect .aieng package and return project summary",
     ),
     (
-        ["refresh", "semantic", "validate", "校验", "语义", "刷新语义"],
+        ["refresh semantic", "refresh semantics", "validate", "校验", "语义", "刷新语义"],
         "aieng.refresh_semantics",
         "Re-validate package and refresh semantic state",
     ),
@@ -316,6 +316,15 @@ _INTENT_MAP: list[tuple[list[str], str, str]] = [
         ],
         "postprocess.generate_computed_metrics",
         "Normalize external post-processing metrics into computed_metrics.json",
+    ),
+    (
+        [
+            "refresh cae summary", "regenerate cae summary", "update postprocessing summary",
+            "refresh result summary", "update cae summary", "summarize cae results",
+            "更新后处理摘要", "刷新cae摘要", "刷新结果摘要", "重新生成摘要",
+        ],
+        "postprocess.refresh_cae_summary",
+        "Regenerate CAE result summary, evidence index, and markdown inside the .aieng package",
     ),
 ]
 

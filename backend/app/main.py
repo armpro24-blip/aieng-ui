@@ -1649,6 +1649,44 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "warnings": result.get("warnings", []),
         }
 
+    def _tool_refresh_cae_summary(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import aieng_bridge
+        from pathlib import Path as _Path
+
+        package_path: str | None = inp.get("packagePath") or inp.get("package_path")
+        project_id: str | None = inp.get("project_id")
+
+        if not package_path and project_id:
+            proj = get_project(active_settings, project_id)
+            pkg = resolve_project_path(active_settings, project_id, proj.get("aieng_file"))
+            if pkg is not None and pkg.exists():
+                package_path = str(pkg)
+
+        if not package_path:
+            return {
+                "status": "error",
+                "code": "missing_cae_summary_package_path",
+                "message": (
+                    "No package path provided and no project_id could be resolved. "
+                    "Pass packagePath or a project_id with an .aieng file."
+                ),
+            }
+
+        if not _Path(package_path).exists():
+            return {
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Package not found: {package_path}",
+            }
+
+        overwrite = bool(inp.get("overwrite", True))
+        result = aieng_bridge.refresh_cae_result_summary(
+            package_path,
+            aieng_root=active_settings.aieng_root,
+            overwrite=overwrite,
+        )
+        return result
+
     def _tool_freecad_run_macro(_inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
         # The execute_run() approval gate should prevent this from being called.
         # This body is a defensive belt-and-suspenders guard.
@@ -1690,6 +1728,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "postprocess.generate_computed_metrics",
         _tool_generate_computed_metrics,
         description="Normalize external post-processing metrics into computed_metrics.json",
+    )
+    _rt.register_tool(
+        "postprocess.refresh_cae_summary",
+        _tool_refresh_cae_summary,
+        description="Regenerate CAE result summary, evidence index, and markdown inside the .aieng package",
     )
     _rt.register_tool(
         "freecad.run_macro",
