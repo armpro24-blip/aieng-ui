@@ -21,7 +21,7 @@ Nine registered runtime tools (7 working + 2 skeleton):
 | `aieng.read_audit_log` | Working |
 | `freecad.inspect_geometry` | Working — FreeCADCmd bridge |
 | `freecad.export_step` | Working — FreeCADCmd bridge; writes `{stem}_export.step` |
-| `postprocess.generate_computed_metrics` | Working — normalizes external metrics into `computed_metrics.json` |
+| `postprocess.generate_computed_metrics` | Working — normalizes external metrics into `computed_metrics.json` and writes it back into the `.aieng` package |
 | `postprocess.refresh_cae_summary` | Working — regenerates CAE result summary, evidence index, and markdown |
 | `freecad.run_macro` | Skeleton, approval-gated |
 
@@ -47,6 +47,8 @@ npm run dev
 cd backend
 "C:/Users/RL_Carla/anaconda3/python.exe" -m pytest -c NUL tests/test_api.py -v
 ```
+
+A generic end-to-end post-processing smoke test (`test_postprocessing_smoke_metrics_import_and_summary_refresh`) validates the full metrics-import → summary-refresh workflow without solver execution or part-family fixtures.
 
 ## Documentation
 

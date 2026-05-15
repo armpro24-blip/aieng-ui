@@ -2,6 +2,7 @@
 import zipfile
 from pathlib import Path
 
+import pytest
 from fastapi.testclient import TestClient
 
 from app.main import (
@@ -1231,3 +1232,198 @@ def test_refresh_cae_summary_missing_package_path_returns_error(tmp_path: Path) 
         )
     finally:
         _rt.build_plan = original_build
+
+
+def test_postprocessing_smoke_metrics_import_and_summary_refresh(tmp_path: Path) -> None:
+    """Generic end-to-end smoke test for the post-processing workflow.
+
+    Flow:
+      1. Create a temp project with a minimal .aieng package.
+      2. Write a generic metrics CSV to a temp path.
+      3. Run postprocess.generate_computed_metrics via runtime.
+      4. Assert computed_metrics.json was written back into the .aieng package.
+      5. Run postprocess.refresh_cae_summary via runtime.
+      6. Assert the refreshed summary contains the imported metrics.
+
+    This test uses generic names only (no part-family-specific fixtures).
+    """
+    from app.main import Settings, create_app, default_project, get_project, project_dir, save_project
+    import zipfile
+
+    workspace = tmp_path / "workspace"
+    settings = Settings(
+        platform_root=tmp_path / "platform",
+        workspace_root=workspace,
+        data_root=tmp_path / "data",
+        aieng_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng"),
+        freecad_mcp_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng_freecad_mcp"),
+        freecad_home=workspace / "freecad",
+        sample_step=workspace / "sample.step",
+    )
+    app = create_app(settings)
+    client = TestClient(app)
+
+    # 1. Create project and minimal .aieng package
+    project = save_project(settings, default_project("generic-smoke"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "generic-smoke.aieng"
+    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "generic-smoke", "resources": {}}))
+    project["aieng_file"] = "generic-smoke.aieng"
+    save_project(settings, project)
+
+    # 2. Write generic metrics CSV
+    metrics_csv = tmp_path / "generic_metrics.csv"
+    metrics_csv.write_text(
+        "name,value,unit\n"
+        "max_von_mises_stress,187.4,MPa\n"
+        "max_displacement,0.82,mm\n"
+        "minimum_safety_factor,1.33,\n",
+        encoding="utf-8",
+    )
+
+    # 3. Generate computed metrics via runtime
+    gen_resp = client.post("/api/runtime/runs", json={
+        "message": "generate computed metrics",
+        "project_id": project_id,
+        "tool_input": {
+            "inputPath": str(metrics_csv),
+            "project_id": project_id,
+            "loadCaseId": "load_case_001",
+            "software": "External postprocessor",
+        },
+    })
+    assert gen_resp.status_code == 200
+    gen_run = gen_resp.json()
+    assert gen_run["status"] == "completed", f"generate computed metrics failed: {gen_run}"
+    # Assert artifact was produced on disk
+    computed_metrics_path = pkg_path.parent / "results" / "computed_metrics.json"
+    assert computed_metrics_path.exists(), f"computed_metrics.json not found at {computed_metrics_path}"
+    # Assert artifact was written back into the .aieng package
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        assert "results/computed_metrics.json" in zf.namelist(), "computed_metrics.json not in package"
+
+    # 4. Refresh CAE summary via runtime
+    refresh_resp = client.post("/api/runtime/runs", json={
+        "message": "refresh cae summary",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "overwrite": True,
+        },
+    })
+    assert refresh_resp.status_code == 200
+    refresh_run = refresh_resp.json()
+    assert refresh_run["status"] == "completed", f"refresh cae summary failed: {refresh_run}"
+    # Assert changed artifacts include the summary files
+    artifact_paths = [
+        a["path"]
+        for tr in refresh_run["tool_results"]
+        for a in (tr.get("artifacts") or [])
+        if isinstance(a, dict) and "path" in a
+    ]
+    assert any("result_summary.json" in p for p in artifact_paths), artifact_paths
+    assert any("evidence_index.json" in p for p in artifact_paths), artifact_paths
+    assert any("postprocessing_summary.md" in p for p in artifact_paths), artifact_paths
+
+    # 5. Read the refreshed summary and assert imported metrics are visible
+    summary_resp = client.get(f"/api/projects/{project_id}/cae-result-summary")
+    assert summary_resp.status_code == 200
+    summary = summary_resp.json()
+    assert summary["computed_values"]["extrema_computed"] is True
+    assert summary["computed_values"]["max_von_mises_stress"]["value"] == 187.4
+    assert summary["computed_values"]["max_displacement"]["value"] == 0.82
+    assert summary["computed_values"]["minimum_safety_factor"]["value"] == 1.33
+
+
+def test_write_artifact_to_package_adds_new_file(tmp_path: Path) -> None:
+    """write_artifact_to_package inserts a new file into an .aieng package."""
+    from app.main import write_artifact_to_package
+    import zipfile
+
+    pkg = tmp_path / "test.aieng"
+    with zipfile.ZipFile(pkg, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "test", "resources": {}}))
+        zf.writestr("other.txt", b"keep me")
+
+    source = tmp_path / "computed_metrics.json"
+    source.write_text('{"metrics": []}', encoding="utf-8")
+
+    result = write_artifact_to_package(pkg, "results/computed_metrics.json", source, overwrite=True)
+    assert result["path"] == "results/computed_metrics.json"
+
+    with zipfile.ZipFile(pkg, "r") as zf:
+        names = set(zf.namelist())
+        assert "results/computed_metrics.json" in names
+        assert "other.txt" in names
+        assert "manifest.json" in names
+        assert zf.read("other.txt") == b"keep me"
+        assert json.loads(zf.read("results/computed_metrics.json")) == {"metrics": []}
+
+
+def test_write_artifact_to_package_overwrites_existing(tmp_path: Path) -> None:
+    """write_artifact_to_package replaces an existing entry without duplicates."""
+    from app.main import write_artifact_to_package
+    import zipfile
+
+    pkg = tmp_path / "test.aieng"
+    with zipfile.ZipFile(pkg, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "test", "resources": {}}))
+        zf.writestr("results/computed_metrics.json", b"old")
+
+    source = tmp_path / "computed_metrics.json"
+    source.write_text('{"metrics": [1]}', encoding="utf-8")
+
+    write_artifact_to_package(pkg, "results/computed_metrics.json", source, overwrite=True)
+
+    with zipfile.ZipFile(pkg, "r") as zf:
+        names = zf.namelist()
+        assert names.count("results/computed_metrics.json") == 1
+        assert zf.read("results/computed_metrics.json") == b'{"metrics": [1]}'
+
+
+def test_write_artifact_to_package_refuses_overwrite_by_default(tmp_path: Path) -> None:
+    """write_artifact_to_package raises FileExistsError when overwrite=False."""
+    from app.main import write_artifact_to_package
+    import zipfile
+
+    pkg = tmp_path / "test.aieng"
+    with zipfile.ZipFile(pkg, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "test", "resources": {}}))
+        zf.writestr("results/computed_metrics.json", b"old")
+
+    source = tmp_path / "computed_metrics.json"
+    source.write_text('{"metrics": [1]}', encoding="utf-8")
+
+    with pytest.raises(FileExistsError):
+        write_artifact_to_package(pkg, "results/computed_metrics.json", source, overwrite=False)
+
+
+def test_write_artifact_to_package_missing_source_raises(tmp_path: Path) -> None:
+    """write_artifact_to_package raises FileNotFoundError when source is missing."""
+    from app.main import write_artifact_to_package
+    import zipfile
+
+    pkg = tmp_path / "test.aieng"
+    with zipfile.ZipFile(pkg, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "test", "resources": {}}))
+
+    with pytest.raises(FileNotFoundError):
+        write_artifact_to_package(pkg, "results/x.json", tmp_path / "missing.json")
+
+
+def test_write_artifact_to_package_missing_manifest_raises(tmp_path: Path) -> None:
+    """write_artifact_to_package raises ValueError when package lacks manifest.json."""
+    from app.main import write_artifact_to_package
+    import zipfile
+
+    pkg = tmp_path / "test.aieng"
+    with zipfile.ZipFile(pkg, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("other.txt", b"data")
+
+    source = tmp_path / "source.json"
+    source.write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="missing manifest"):
+        write_artifact_to_package(pkg, "results/x.json", source)

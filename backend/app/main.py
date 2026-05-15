@@ -5,6 +5,7 @@ import os
 import re
 import shutil
 import sys
+import tempfile
 import uuid
 import zipfile
 from collections import Counter
@@ -609,6 +610,76 @@ def resolve_project_path(settings: Settings, project_id: str, relpath: str | Non
     except ValueError as exc:
         raise HTTPException(status_code=400, detail="invalid project path") from exc
     return resolved
+
+
+def write_artifact_to_package(
+    package_path: str | Path,
+    artifact_path: str,
+    source_path: str | Path,
+    *,
+    overwrite: bool = True,
+) -> dict[str, Any]:
+    """Write a single artifact file into an existing `.aieng` package ZIP.
+
+    Uses the standard temp-file + atomic-move pattern so the package is
+    never in a partially-written state.
+
+    Args:
+        package_path: Path to the `.aieng` package.
+        artifact_path: Destination path inside the ZIP (e.g. ``results/computed_metrics.json``).
+        source_path: Path to the file on disk to copy into the package.
+        overwrite: Whether to overwrite an existing entry.
+
+    Returns:
+        Artifact metadata dict with ``path``, ``kind``, ``role``, ``source_path``.
+    """
+    path = Path(package_path)
+    source = Path(source_path)
+    if path.suffix != ".aieng":
+        raise ValueError("package path must end with .aieng")
+    if not source.exists():
+        raise FileNotFoundError(f"source file not found: {source}")
+
+    with zipfile.ZipFile(path, mode="r") as package:
+        names = set(package.namelist())
+        if "manifest.json" not in names:
+            raise ValueError("package is missing manifest.json")
+        if not overwrite and artifact_path in names:
+            raise FileExistsError(
+                f"{artifact_path} already exists in package; use overwrite=True to replace"
+            )
+        manifest = json.loads(package.read("manifest.json"))
+        existing_members: list[tuple[zipfile.ZipInfo, bytes]] = []
+        seen: set[str] = set()
+        for info in package.infolist():
+            if info.filename in seen or info.filename == artifact_path or info.filename == "manifest.json":
+                continue
+            seen.add(info.filename)
+            data = b"" if info.is_dir() else package.read(info.filename)
+            existing_members.append((info, data))
+
+    manifest_json = json.dumps(manifest, indent=2, sort_keys=True) + "\n"
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".aieng", dir=path.parent) as temp_handle:
+        temp_path = Path(temp_handle.name)
+
+    try:
+        with zipfile.ZipFile(temp_path, mode="w", compression=zipfile.ZIP_DEFLATED) as out_package:
+            for info, data in existing_members:
+                out_package.writestr(info, data)
+            out_package.writestr("manifest.json", manifest_json)
+            out_package.writestr(artifact_path, source.read_bytes())
+        shutil.move(str(temp_path), path)
+    finally:
+        if temp_path.exists():
+            temp_path.unlink()
+
+    return {
+        "path": artifact_path,
+        "kind": Path(artifact_path).stem,
+        "role": "artifact",
+        "source_path": str(source),
+    }
 
 
 def convert_stl_to_glb(stl_path: Path, glb_path: Path) -> dict[str, Any]:
@@ -1632,6 +1703,37 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             source_files=inp.get("sourceFiles") or inp.get("source_files") or [],
         )
 
+        artifacts: list[dict[str, Any]] = [
+            {
+                "path": output_path,
+                "kind": "computed_metrics",
+                "role": "external_postprocessing_metrics",
+            }
+        ]
+        warnings: list[str] = list(result.get("warnings") or [])
+
+        # Write-back into .aieng package so refresh_cae_summary can read it
+        if project_id:
+            try:
+                proj = get_project(active_settings, project_id)
+                pkg = resolve_project_path(active_settings, project_id, proj.get("aieng_file"))
+                if pkg is not None and pkg.exists():
+                    pkg_artifact = write_artifact_to_package(
+                        pkg,
+                        "results/computed_metrics.json",
+                        output_path,
+                        overwrite=True,
+                    )
+                    artifacts.append({
+                        "path": pkg_artifact["path"],
+                        "kind": "computed_metrics",
+                        "role": "package_postprocessing_metrics",
+                    })
+                else:
+                    warnings.append("computed_metrics_not_written_to_package: no .aieng package found")
+            except Exception as exc:
+                warnings.append(f"computed_metrics_not_written_to_package: {exc}")
+
         # Normalize to a runtime-friendly dict with artifacts
         return {
             "status": "ok",
@@ -1640,14 +1742,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "metrics_count": sum(
                 len(lc.get("metrics", {})) for lc in result.get("load_cases", [])
             ),
-            "artifacts": [
-                {
-                    "path": output_path,
-                    "kind": "computed_metrics",
-                    "role": "external_postprocessing_metrics",
-                }
-            ],
-            "warnings": result.get("warnings", []),
+            "artifacts": artifacts,
+            "warnings": warnings,
         }
 
     def _tool_refresh_cae_summary(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
