@@ -1588,7 +1588,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         # Resolve output path: explicit → project workspace results/
         if not output_path and project_id:
-            pkg = resolve_project_path(active_settings, project_id, project.get("aieng_file"))
+            proj = get_project(active_settings, project_id)
+            pkg = resolve_project_path(active_settings, project_id, proj.get("aieng_file"))
             if pkg is not None and pkg.exists():
                 # Write into the same directory as the .aieng package
                 output_path = str(pkg.parent / "results" / "computed_metrics.json")

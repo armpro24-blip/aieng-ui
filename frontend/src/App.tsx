@@ -633,6 +633,10 @@ export default function App() {
   const [fieldDescriptor, setFieldDescriptor] = useState<SolverFieldDescriptor | null>(null);
   const [lastRuntimeRun, setLastRuntimeRun] = useState<RuntimeRun | null>(null);
   const [caeRefreshing, setCaeRefreshing] = useState(false);
+  const [metricsInputPath, setMetricsInputPath] = useState("");
+  const [metricsLoadCaseId, setMetricsLoadCaseId] = useState("load_case_001");
+  const [metricsSoftware, setMetricsSoftware] = useState("");
+  const [metricsImporting, setMetricsImporting] = useState(false);
   const chatLogRef = useRef<HTMLDivElement | null>(null);
 
   const selectedProject = useMemo(
@@ -980,6 +984,64 @@ export default function App() {
       setNotice({ tone: "error", title: "CAE 摘要刷新失败", detail });
     } finally {
       setCaeRefreshing(false);
+    }
+  }
+
+  async function importMetricsAndRefresh() {
+    if (!selectedId || metricsImporting) return;
+    const inputPath = metricsInputPath.trim();
+    if (!inputPath) {
+      setNotice({ tone: "info", title: "请输入指标文件路径", detail: "需要提供外部 JSON/CSV 指标文件的绝对路径。" });
+      return;
+    }
+    setMetricsImporting(true);
+    setNotice(null);
+    try {
+      // Step 1: generate computed_metrics.json
+      const genRun = await api.startRun("generate computed metrics", selectedId, {
+        inputPath,
+        project_id: selectedId,
+        loadCaseId: metricsLoadCaseId.trim() || "load_case_001",
+        software: metricsSoftware.trim() || undefined,
+      });
+      setLastRuntimeRun(genRun);
+      appendRunToChatHistory(genRun);
+      if (genRun.status !== "completed") {
+        setNotice({
+          tone: "error",
+          title: "计算指标生成失败",
+          detail: genRun.errors[0] || genRun.summary || "运行时返回非成功状态。",
+        });
+        setMetricsImporting(false);
+        return;
+      }
+
+      // Step 2: refresh CAE summary
+      const refreshRun = await api.startRun("refresh cae summary", selectedId, {
+        project_id: selectedId,
+        overwrite: true,
+      });
+      setLastRuntimeRun(refreshRun);
+      appendRunToChatHistory(refreshRun);
+      if (refreshRun.status === "completed") {
+        await refreshProjects(selectedId);
+        setNotice({
+          tone: "success",
+          title: "计算指标已导入并刷新摘要",
+          detail: refreshRun.summary || "已生成计算指标并重新生成 CAE 结果摘要。",
+        });
+      } else {
+        setNotice({
+          tone: "error",
+          title: "CAE 摘要刷新失败",
+          detail: refreshRun.errors[0] || refreshRun.summary || "运行时返回非成功状态。",
+        });
+      }
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setNotice({ tone: "error", title: "导入计算指标失败", detail });
+    } finally {
+      setMetricsImporting(false);
     }
   }
 
@@ -1340,6 +1402,43 @@ export default function App() {
                     <span className="summary-muted" style={{ fontSize: 12 }}>
                       重新生成 .aieng CAE 摘要/证据文件（不执行求解器）
                     </span>
+                  </div>
+                  <div className="summary-note" style={{ marginTop: 12 }}>
+                    <strong>导入外部计算指标</strong>
+                    <p style={{ fontSize: 12, margin: "4px 0 8px" }}>
+                      从已有的 JSON/CSV 文件导入指标，再刷新 CAE 摘要。不执行求解器。
+                    </p>
+                    <input
+                      type="text"
+                      placeholder="C:\path\to\metrics.json or metrics.csv"
+                      value={metricsInputPath}
+                      onChange={(e) => setMetricsInputPath(e.target.value)}
+                      style={{ width: "100%", marginBottom: 6 }}
+                    />
+                    <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+                      <input
+                        type="text"
+                        placeholder="Load case ID"
+                        value={metricsLoadCaseId}
+                        onChange={(e) => setMetricsLoadCaseId(e.target.value)}
+                        style={{ flex: 1 }}
+                      />
+                      <input
+                        type="text"
+                        placeholder="Software (e.g. FreeCAD FEM)"
+                        value={metricsSoftware}
+                        onChange={(e) => setMetricsSoftware(e.target.value)}
+                        style={{ flex: 1 }}
+                      />
+                    </div>
+                    <div className="action-row">
+                      <button
+                        disabled={metricsImporting || !selectedId}
+                        onClick={() => void importMetricsAndRefresh()}
+                      >
+                        {metricsImporting ? "正在导入并刷新…" : "导入计算指标并刷新摘要"}
+                      </button>
+                    </div>
                   </div>
                   {caeSummary?.result_summary ? (
                     <div className="summary-note" style={{ marginTop: 10 }}>
