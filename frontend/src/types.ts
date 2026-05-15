@@ -153,9 +153,30 @@ export type ProjectSummary = {
       } | null;
       computed_values: {
         extrema_computed: boolean;
-        max_displacement: number | null;
-        max_von_mises_stress: number | null;
-        minimum_safety_factor: number | null;
+        source?: string | null;
+        computed_by?: string | null;
+        max_displacement: {
+          value: number;
+          unit: string | null;
+          field?: string | null;
+          location?: Record<string, unknown> | null;
+        } | null;
+        max_von_mises_stress: {
+          value: number;
+          unit: string | null;
+          field?: string | null;
+          location?: Record<string, unknown> | null;
+        } | null;
+        minimum_safety_factor: {
+          value: number;
+          unit: string | null;
+          basis?: string | null;
+          location?: Record<string, unknown> | null;
+        } | null;
+        by_load_case?: Array<{
+          id: string;
+          metrics: Record<string, unknown>;
+        }> | null;
       };
       llm_summary: {
         one_line: string;

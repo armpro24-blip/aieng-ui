@@ -1328,6 +1328,22 @@ export default function App() {
                           <small><strong>Field metadata:</strong> {caeSummary.result_summary.field_metadata.count} field(s) registered{caeSummary.result_summary.field_metadata.format ? ` (${caeSummary.result_summary.field_metadata.format})` : ""}</small>
                         </div>
                       ) : null}
+                      {caeSummary.result_summary.computed_values.extrema_computed ? (
+                        <div style={{ marginTop: 6 }}>
+                          <small><strong>Imported computed metrics</strong>{caeSummary.result_summary.computed_values.computed_by ? ` — ${caeSummary.result_summary.computed_values.computed_by}` : ""}</small>
+                          <div style={{ marginTop: 2 }}>
+                            {caeSummary.result_summary.computed_values.max_von_mises_stress ? (
+                              <small>σ_max: {caeSummary.result_summary.computed_values.max_von_mises_stress.value} {caeSummary.result_summary.computed_values.max_von_mises_stress.unit || ""} | </small>
+                            ) : null}
+                            {caeSummary.result_summary.computed_values.max_displacement ? (
+                              <small>U_max: {caeSummary.result_summary.computed_values.max_displacement.value} {caeSummary.result_summary.computed_values.max_displacement.unit || ""} | </small>
+                            ) : null}
+                            {caeSummary.result_summary.computed_values.minimum_safety_factor ? (
+                              <small>SF_min: {caeSummary.result_summary.computed_values.minimum_safety_factor.value}</small>
+                            ) : null}
+                          </div>
+                        </div>
+                      ) : null}
                       {caeSummary.result_summary.llm_summary.limitations.length ? (
                         <div style={{ marginTop: 6 }}>
                           <small>
