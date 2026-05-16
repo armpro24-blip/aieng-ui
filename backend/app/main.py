@@ -733,6 +733,177 @@ def write_artifact_to_package(
 
 
 # ---------------------------------------------------------------------------
+# Artifact review (Phase 26) — read-only inspection of .aieng package contents
+# ---------------------------------------------------------------------------
+# Purpose: enable humans to review what an agent or runtime tool wrote into a
+# .aieng package. Read-only — does NOT execute solvers, mutate packages, or
+# advance claims. This is evidence review, not engineering computation.
+
+_ARTIFACT_MAX_TEXT_BYTES = 256 * 1024
+_ARTIFACT_MAX_PARSE_BYTES = 2 * 1024 * 1024
+
+_ARTIFACT_TEXT_SUFFIXES = frozenset(
+    {".json", ".md", ".txt", ".yaml", ".yml", ".log", ".csv", ".inp"}
+)
+_ARTIFACT_MEDIA_HINTS: dict[str, str] = {
+    ".json": "application/json",
+    ".md": "text/markdown",
+    ".txt": "text/plain",
+    ".yaml": "application/yaml",
+    ".yml": "application/yaml",
+    ".log": "text/plain",
+    ".csv": "text/csv",
+    ".inp": "text/plain",
+    ".frd": "application/octet-stream",
+    ".vtu": "application/octet-stream",
+    ".vtk": "application/octet-stream",
+    ".step": "application/octet-stream",
+    ".stp": "application/octet-stream",
+    ".stl": "application/octet-stream",
+    ".glb": "model/gltf-binary",
+}
+
+
+def _is_safe_artifact_path(p: str) -> bool:
+    """Return True if `p` is a safe relative archive path.
+
+    Rejects empty strings, leading separators, backslashes, and any `..`
+    segment. Archive paths use forward slashes only.
+    """
+    if not p:
+        return False
+    if p.startswith("/") or p.startswith("./"):
+        return False
+    if "\\" in p:
+        return False
+    parts = p.split("/")
+    if any(seg in ("", "..", ".") for seg in parts):
+        return False
+    return True
+
+
+def _classify_artifact_media_type(name: str) -> str:
+    suffix = Path(name).suffix.lower()
+    return _ARTIFACT_MEDIA_HINTS.get(suffix, "application/octet-stream")
+
+
+def _read_artifact_from_package(
+    package_path: Path,
+    artifact_path: str,
+) -> dict[str, Any]:
+    """Read a single artifact from a `.aieng` package as a review payload.
+
+    Always returns 200-shape data; callers handle 400/404 separately.
+    """
+    response: dict[str, Any] = {
+        "path": artifact_path,
+        "exists": False,
+        "media_type": _classify_artifact_media_type(artifact_path),
+        "warnings": [],
+    }
+
+    try:
+        with zipfile.ZipFile(package_path, "r") as archive:
+            try:
+                info = archive.getinfo(artifact_path)
+            except KeyError:
+                return response
+            response["exists"] = True
+            response["size_bytes"] = info.file_size
+            data = archive.read(artifact_path)
+    except zipfile.BadZipFile:
+        response["warnings"].append("package is not a valid zip archive")
+        return response
+
+    suffix = Path(artifact_path).suffix.lower()
+    is_textual = suffix in _ARTIFACT_TEXT_SUFFIXES
+    has_null = b"\x00" in data[:4096]
+    if has_null:
+        is_textual = False
+        response["warnings"].append("binary content detected; text omitted")
+
+    if is_textual:
+        if info.file_size <= _ARTIFACT_MAX_TEXT_BYTES:
+            try:
+                response["text"] = data.decode("utf-8")
+            except UnicodeDecodeError:
+                response["warnings"].append("utf-8 decode failed; text omitted")
+        else:
+            response["warnings"].append(
+                f"file size {info.file_size} bytes exceeds inline text cap "
+                f"{_ARTIFACT_MAX_TEXT_BYTES}; text omitted"
+            )
+
+    if suffix == ".json" and info.file_size <= _ARTIFACT_MAX_PARSE_BYTES and not has_null:
+        try:
+            response["parsed_json"] = json.loads(data)
+        except json.JSONDecodeError as exc:
+            response["warnings"].append(f"json parse failed: {exc.msg}")
+    elif suffix == ".json" and info.file_size > _ARTIFACT_MAX_PARSE_BYTES:
+        response["warnings"].append(
+            f"file size {info.file_size} bytes exceeds parse cap "
+            f"{_ARTIFACT_MAX_PARSE_BYTES}; parsed_json omitted"
+        )
+
+    return response
+
+
+def _json_diff_paths(
+    before: Any,
+    after: Any,
+    prefix: str = "",
+) -> tuple[list[str], list[str], list[str]]:
+    """Compute RFC-6901 JSON Pointer paths for changes between two JSON values.
+
+    Returns (changed_paths, added_paths, removed_paths). Comparison is
+    structural and recursive. Lists are compared element-by-element up to the
+    shorter length; the tail is reported under added/removed. Primitive
+    inequality at a leaf produces a changed path.
+
+    Path encoding: `/` separators, `~0` for `~` and `~1` for `/` per RFC-6901.
+    """
+    def _escape(token: str) -> str:
+        return token.replace("~", "~0").replace("/", "~1")
+
+    changed: list[str] = []
+    added: list[str] = []
+    removed: list[str] = []
+
+    if isinstance(before, dict) and isinstance(after, dict):
+        before_keys = set(before.keys())
+        after_keys = set(after.keys())
+        for key in sorted(before_keys & after_keys):
+            sub_changed, sub_added, sub_removed = _json_diff_paths(
+                before[key], after[key], f"{prefix}/{_escape(str(key))}"
+            )
+            changed.extend(sub_changed)
+            added.extend(sub_added)
+            removed.extend(sub_removed)
+        for key in sorted(after_keys - before_keys):
+            added.append(f"{prefix}/{_escape(str(key))}")
+        for key in sorted(before_keys - after_keys):
+            removed.append(f"{prefix}/{_escape(str(key))}")
+    elif isinstance(before, list) and isinstance(after, list):
+        common = min(len(before), len(after))
+        for i in range(common):
+            sub_changed, sub_added, sub_removed = _json_diff_paths(
+                before[i], after[i], f"{prefix}/{i}"
+            )
+            changed.extend(sub_changed)
+            added.extend(sub_added)
+            removed.extend(sub_removed)
+        for i in range(common, len(after)):
+            added.append(f"{prefix}/{i}")
+        for i in range(common, len(before)):
+            removed.append(f"{prefix}/{i}")
+    else:
+        if before != after:
+            changed.append(prefix or "")
+
+    return changed, added, removed
+
+
+# ---------------------------------------------------------------------------
 # cae.apply_setup_patch — constants and helpers
 # ---------------------------------------------------------------------------
 
@@ -1847,6 +2018,73 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if result is None:
             raise HTTPException(status_code=503, detail="aieng simulation run summarizer unavailable")
         return result
+
+    @app.get("/api/projects/{project_id}/artifact")
+    def get_project_artifact(project_id: str, path: str = "") -> dict[str, Any]:
+        """Read a single artifact from the project's .aieng package.
+
+        Phase 26 — evidence review groundwork. Read-only. Does NOT execute
+        solvers, mutate packages, or advance claims.
+
+        Query parameters:
+            path: Artifact path inside the package, e.g.
+                  ``results/computed_metrics.json``. Must be a relative path
+                  with forward slashes; leading ``/``, backslashes, ``.``,
+                  and ``..`` segments are rejected with 400.
+
+        Returns:
+            ``{path, exists, media_type, size_bytes?, parsed_json?, text?, warnings}``.
+            ``exists=false`` returns 200, not 404, so callers can probe
+            artifact presence without exception handling. The package
+            itself missing returns 404.
+        """
+        if not _is_safe_artifact_path(path):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "invalid artifact path: must be a relative archive path "
+                    "with no leading '/', no '..' segments, and no backslashes"
+                ),
+            )
+        project = get_project(active_settings, project_id)
+        package_path = resolve_project_path(
+            active_settings, project_id, project.get("aieng_file")
+        )
+        if package_path is None or not package_path.exists():
+            raise HTTPException(status_code=404, detail=".aieng package not found")
+        return _read_artifact_from_package(package_path, path)
+
+    @app.post("/api/projects/{project_id}/artifact/diff")
+    def diff_project_artifact(
+        project_id: str,
+        payload: dict[str, Any] = Body(default=None),
+    ) -> dict[str, Any]:
+        """Compute changed JSON pointer paths between two arbitrary JSON values.
+
+        Phase 26 — paired with the artifact read endpoint so callers can
+        capture before/after JSON snapshots themselves and ask the server
+        for a structural diff. Pure computation; no package access.
+
+        Body:
+            ``{"before": <any>, "after": <any>}``
+
+        Returns:
+            ``{"changed_paths": [...], "added_paths": [...], "removed_paths": [...]}``.
+            Paths are RFC-6901 JSON pointers.
+        """
+        get_project(active_settings, project_id)
+        body = payload or {}
+        if "before" not in body or "after" not in body:
+            raise HTTPException(
+                status_code=400,
+                detail="body must contain both 'before' and 'after' keys",
+            )
+        changed, added, removed = _json_diff_paths(body["before"], body["after"])
+        return {
+            "changed_paths": changed,
+            "added_paths": added,
+            "removed_paths": removed,
+        }
 
     @app.post("/api/projects/{project_id}/import-aieng")
     def import_project(project_id: str) -> dict[str, Any]:

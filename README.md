@@ -48,6 +48,20 @@ and `freecad.run_macro` are approval-gated):
 
 External agents (Claude Code, Codex, custom MCP clients) can access all runtime tools via the MCP bridge in `aieng_freecad_mcp`. See [`../docs/runtime_and_agents.md`](../docs/runtime_and_agents.md).
 
+## Evidence review API
+
+Read-only endpoints for human review of artifacts inside a project's `.aieng`
+package. These do NOT execute solvers, mutate packages, or advance claims —
+they exist so a reviewer (or agent) can inspect what the runtime wrote.
+
+| Endpoint | Purpose |
+|---|---|
+| `GET /api/projects/{project_id}/artifact?path=...` | Read a single artifact from the project's `.aieng` package. Returns `{path, exists, media_type, size_bytes?, parsed_json?, text?, warnings}`. JSON files are parsed when ≤ 2 MB; text files are inlined when ≤ 256 KB. Missing artifacts return `exists: false` with 200. Path traversal, absolute paths, and backslashes are rejected with 400. |
+| `POST /api/projects/{project_id}/artifact/diff` | Compute RFC-6901 JSON Pointer paths for differences between two JSON values supplied in the body as `{before, after}`. Returns `{changed_paths, added_paths, removed_paths}`. Pure computation; no package access. |
+
+Pair the two: capture a JSON artifact before an action, capture it again
+after, then POST both to `/artifact/diff` to surface the structural delta.
+
 ## Quickstart
 
 ```bash

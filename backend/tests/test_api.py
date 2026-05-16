@@ -3296,3 +3296,253 @@ def test_capability_registry_includes_critical_runtime_tools(tmp_path: Path) -> 
     assert not missing, (
         f"Critical runtime tools missing from capability registry: {missing}"
     )
+
+
+# ---------------------------------------------------------------------------
+# Phase 26 — artifact review endpoint
+# ---------------------------------------------------------------------------
+
+def _setup_project_with_package(
+    tmp_path: Path,
+    package_members: dict[str, bytes],
+) -> tuple[TestClient, str]:
+    """Build a project with a .aieng package containing the supplied members."""
+    from app.main import default_project, project_dir
+
+    settings = _make_runtime_settings(tmp_path)
+    project = save_project(settings, default_project("artifact-review"))
+    pkg_dir = project_dir(settings, project["id"]) / "packages"
+    pkg_dir.mkdir(parents=True, exist_ok=True)
+    pkg_path = pkg_dir / "review.aieng"
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "review"}))
+        for name, data in package_members.items():
+            zf.writestr(name, data)
+    project["aieng_file"] = "packages/review.aieng"
+    save_project(settings, project)
+    return TestClient(create_app(settings)), project["id"]
+
+
+def test_artifact_read_returns_parsed_json(tmp_path: Path) -> None:
+    payload = {"schema_version": "0.3", "load_cases": [{"id": "lc1"}]}
+    client, pid = _setup_project_with_package(
+        tmp_path,
+        {"results/computed_metrics.json": json.dumps(payload).encode()},
+    )
+
+    resp = client.get(
+        f"/api/projects/{pid}/artifact",
+        params={"path": "results/computed_metrics.json"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["path"] == "results/computed_metrics.json"
+    assert body["exists"] is True
+    assert body["media_type"] == "application/json"
+    assert body["size_bytes"] > 0
+    assert body["parsed_json"] == payload
+    assert "text" in body  # JSON is also returned as text
+    assert body["warnings"] == []
+
+
+def test_artifact_read_returns_text_for_markdown(tmp_path: Path) -> None:
+    markdown = "# Result Summary\n\n- max stress: 187.4 MPa\n"
+    client, pid = _setup_project_with_package(
+        tmp_path,
+        {"results/postprocessing_summary.md": markdown.encode("utf-8")},
+    )
+
+    resp = client.get(
+        f"/api/projects/{pid}/artifact",
+        params={"path": "results/postprocessing_summary.md"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["exists"] is True
+    assert body["media_type"] == "text/markdown"
+    assert body["text"] == markdown
+    assert "parsed_json" not in body
+
+
+def test_artifact_read_returns_exists_false_for_missing(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+
+    resp = client.get(
+        f"/api/projects/{pid}/artifact",
+        params={"path": "results/computed_metrics.json"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["exists"] is False
+    assert body["path"] == "results/computed_metrics.json"
+    assert "size_bytes" not in body
+    assert "parsed_json" not in body
+    assert "text" not in body
+
+
+def test_artifact_read_rejects_parent_traversal(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+
+    resp = client.get(
+        f"/api/projects/{pid}/artifact",
+        params={"path": "../../../etc/passwd"},
+    )
+    assert resp.status_code == 400
+    assert "invalid artifact path" in resp.json()["detail"]
+
+
+def test_artifact_read_rejects_absolute_path(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+
+    resp = client.get(
+        f"/api/projects/{pid}/artifact",
+        params={"path": "/etc/passwd"},
+    )
+    assert resp.status_code == 400
+
+
+def test_artifact_read_rejects_backslash(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+
+    resp = client.get(
+        f"/api/projects/{pid}/artifact",
+        params={"path": "results\\computed_metrics.json"},
+    )
+    assert resp.status_code == 400
+
+
+def test_artifact_read_rejects_empty_path(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+
+    resp = client.get(f"/api/projects/{pid}/artifact", params={"path": ""})
+    assert resp.status_code == 400
+
+
+def test_artifact_read_large_text_returns_size_only(tmp_path: Path) -> None:
+    # 300 KB markdown exceeds the 256 KB inline cap.
+    big_md = ("line " + "x" * 100 + "\n") * 3000
+    assert len(big_md.encode("utf-8")) > 256 * 1024
+    client, pid = _setup_project_with_package(
+        tmp_path,
+        {"results/postprocessing_summary.md": big_md.encode("utf-8")},
+    )
+
+    resp = client.get(
+        f"/api/projects/{pid}/artifact",
+        params={"path": "results/postprocessing_summary.md"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["exists"] is True
+    assert body["size_bytes"] > 256 * 1024
+    assert "text" not in body
+    assert any("exceeds inline text cap" in w for w in body["warnings"])
+
+
+def test_artifact_read_binary_suppresses_text(tmp_path: Path) -> None:
+    # Synthetic binary blob with embedded NUL bytes inside the first 4 KB.
+    binary = b"FRD\x00\x00binary content\x00\x01\x02more"
+    client, pid = _setup_project_with_package(
+        tmp_path,
+        {"simulation/runs/run_001/outputs/result.frd": binary},
+    )
+
+    resp = client.get(
+        f"/api/projects/{pid}/artifact",
+        params={"path": "simulation/runs/run_001/outputs/result.frd"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["exists"] is True
+    assert body["media_type"] == "application/octet-stream"
+    assert "text" not in body
+    assert "parsed_json" not in body
+    assert any("binary content detected" in w for w in body["warnings"])
+
+
+def test_artifact_read_invalid_json_returns_warning(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(
+        tmp_path,
+        {"results/computed_metrics.json": b"{not valid json}"},
+    )
+
+    resp = client.get(
+        f"/api/projects/{pid}/artifact",
+        params={"path": "results/computed_metrics.json"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["exists"] is True
+    assert "parsed_json" not in body
+    assert any("json parse failed" in w for w in body["warnings"])
+    assert body["text"] == "{not valid json}"  # text still returned
+
+
+def test_artifact_read_404_when_package_missing(tmp_path: Path) -> None:
+    from app.main import default_project
+
+    settings = _make_runtime_settings(tmp_path)
+    project = save_project(settings, default_project("no-package"))
+    client = TestClient(create_app(settings))
+
+    resp = client.get(
+        f"/api/projects/{project['id']}/artifact",
+        params={"path": "results/computed_metrics.json"},
+    )
+    assert resp.status_code == 404
+
+
+def test_artifact_diff_reports_changed_added_removed_paths(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+
+    before = {
+        "schema_version": "0.1",
+        "load_cases": [{"id": "lc1", "metrics": {"max_stress": 100.0}}],
+        "removed_block": {"obsolete": True},
+    }
+    after = {
+        "schema_version": "0.3",
+        "load_cases": [
+            {"id": "lc1", "metrics": {"max_stress": 187.4}},
+            {"id": "lc2"},
+        ],
+        "added_block": {"new": True},
+    }
+
+    resp = client.post(
+        f"/api/projects/{pid}/artifact/diff",
+        json={"before": before, "after": after},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert "/schema_version" in body["changed_paths"]
+    assert "/load_cases/0/metrics/max_stress" in body["changed_paths"]
+    assert "/load_cases/1" in body["added_paths"]
+    assert "/added_block" in body["added_paths"]
+    assert "/removed_block" in body["removed_paths"]
+
+
+def test_artifact_diff_identical_documents_empty(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+
+    doc = {"a": 1, "b": [1, 2, 3], "c": {"d": "x"}}
+    resp = client.post(
+        f"/api/projects/{pid}/artifact/diff",
+        json={"before": doc, "after": doc},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["changed_paths"] == []
+    assert body["added_paths"] == []
+    assert body["removed_paths"] == []
+
+
+def test_artifact_diff_rejects_missing_before_after(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+
+    resp = client.post(
+        f"/api/projects/{pid}/artifact/diff",
+        json={"before": {"a": 1}},
+    )
+    assert resp.status_code == 400
+    assert "before" in resp.json()["detail"] and "after" in resp.json()["detail"]
