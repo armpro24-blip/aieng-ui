@@ -1,6 +1,7 @@
 ﻿import json
 import zipfile
 from pathlib import Path
+from typing import Any
 
 import pytest
 from fastapi.testclient import TestClient
@@ -3185,3 +3186,37 @@ def test_vertical_cae_workflow_end_to_end(tmp_path: Path) -> None:
     assert solver_run["converged"] is None                   # does not claim convergence
     assert extract_result["status"] == "ok"                  # distinguishes extraction from execution
     assert "limitations" in summary["llm_summary"]           # reports limitations honestly
+
+
+# ---------------------------------------------------------------------------
+# Bridge schema_version validation hook
+# ---------------------------------------------------------------------------
+
+def test_bridge_check_schema_version_matching_returns_no_warnings() -> None:
+    """A matching on-disk schema_version yields an empty warnings list."""
+    from app.aieng_bridge import _check_schema_version
+
+    warnings = _check_schema_version("0.3", "0.3", "cae_result_summary")
+    assert warnings == []
+
+
+def test_bridge_check_schema_version_mismatch_returns_regenerate_warning() -> None:
+    """A drifted on-disk schema_version produces an actionable warning."""
+    from app.aieng_bridge import _check_schema_version
+
+    warnings = _check_schema_version("0.1", "0.3", "cae_result_summary")
+    assert len(warnings) == 1
+    assert "regenerate" in warnings[0].lower()
+    assert "'0.1'" in warnings[0]
+    assert "'0.3'" in warnings[0]
+    assert "cae_result_summary" in warnings[0]
+
+
+def test_bridge_check_schema_version_missing_returns_regenerate_warning() -> None:
+    """A missing on-disk schema_version produces an actionable warning."""
+    from app.aieng_bridge import _check_schema_version
+
+    warnings = _check_schema_version(None, "0.3", "cae_result_summary")
+    assert len(warnings) == 1
+    assert "regenerate" in warnings[0].lower()
+    assert "missing" in warnings[0].lower()

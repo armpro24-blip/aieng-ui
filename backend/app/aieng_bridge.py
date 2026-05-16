@@ -18,6 +18,27 @@ _REFRESH_ARTIFACTS = [
     {"path": "results/postprocessing_summary.md", "kind": "markdown_summary", "role": "human_llm_readable_summary"},
 ]
 
+
+def _check_schema_version(
+    actual: str | None,
+    expected: str,
+    artifact: str,
+) -> list[str]:
+    """Compare an on-disk schema_version against the expected constant.
+
+    Returns a list with one human-readable warning if there's a mismatch or
+    missing version, otherwise an empty list. The frontend surfaces the
+    warnings array verbatim in the chat panel.
+    """
+    if actual is None:
+        return [f"{artifact}: schema_version missing on disk; regenerate to refresh."]
+    if actual != expected:
+        return [
+            f"{artifact}: schema_version {actual!r} on disk, "
+            f"expected {expected!r}; regenerate."
+        ]
+    return []
+
 _PREPROCESSING_ARTIFACTS = [
     {"path": "simulation/preprocessing_summary.json", "kind": "cae_preprocessing_summary", "role": "preprocessing_readiness_summary"},
     {"path": "simulation/preprocessing_summary.md", "kind": "markdown_summary", "role": "preprocessing_markdown_summary"},
@@ -63,13 +84,20 @@ def refresh_cae_result_summary(
         result_path = write_cae_result_summary_package(path, overwrite=overwrite)
         # Re-read the generated summary to return its schema version
         from aieng.cae_result_summary import generate_cae_result_summary  # type: ignore[import]
+        from aieng.schema_versions import CAE_RESULT_SUMMARY_SCHEMA  # type: ignore[import]
 
         summary = generate_cae_result_summary(result_path)
+        warnings = _check_schema_version(
+            summary.get("schema_version"),
+            CAE_RESULT_SUMMARY_SCHEMA,
+            "cae_result_summary",
+        )
         return {
             "status": "ok",
             "package_path": str(result_path),
             "schema_version": summary.get("schema_version"),
             "artifacts": list(_REFRESH_ARTIFACTS),
+            "warnings": warnings,
         }
     except Exception as exc:
         raise RuntimeError(f"Failed to refresh CAE result summary: {exc}") from exc
@@ -119,13 +147,20 @@ def refresh_preprocessing_summary(
 
         result_path = write_preprocessing_summary_package(path, overwrite=overwrite)
         from aieng.cae_preprocessing_summary import generate_preprocessing_summary  # type: ignore[import]
+        from aieng.schema_versions import CAE_PREPROCESSING_SUMMARY_SCHEMA  # type: ignore[import]
 
         summary = generate_preprocessing_summary(result_path)
+        warnings = _check_schema_version(
+            summary.get("schema_version"),
+            CAE_PREPROCESSING_SUMMARY_SCHEMA,
+            "cae_preprocessing_summary",
+        )
         return {
             "status": "ok",
             "package_path": str(result_path),
             "schema_version": summary.get("schema_version"),
             "artifacts": list(_PREPROCESSING_ARTIFACTS),
+            "warnings": warnings,
         }
     except Exception as exc:
         raise RuntimeError(f"Failed to refresh preprocessing summary: {exc}") from exc
