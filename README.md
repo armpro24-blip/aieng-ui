@@ -11,6 +11,19 @@ Web workbench and FastAPI service for the `.aieng` engineering platform.
 - **Local orchestration runtime** — `RunRecord`, `ToolCall`, `ToolResult`, `RuntimeEvent` types; intent-based plan builder; synchronous executor with approval gate
 - **CAD provider registry** — pluggable `CadProvider` interface; FreeCAD is the first implementation
 
+## Role in the vertical CAE MVP
+
+`aieng-ui` is the **workbench**: the local FastAPI runtime + React SPA where the vertical CAE MVP actually executes. It owns the moving parts that `aieng` deliberately does not:
+
+- The runtime tool registry (table below) and the `POST /api/runtime/runs` orchestration entry point.
+- The **approval gate** — `cae.run_solver` is `requires_approval=True`; the runtime pauses before subprocess execution and exposes explicit `approve`/`reject` REST endpoints.
+- The **external CalculiX subprocess adapter** — `subprocess.run([ccx, …], shell=False)` with timeout, captured stdout/stderr/return code, and honest `converged: null` semantics. AIENG does not host a solver.
+- **Artifact write-back** into the `.aieng` package (atomic ZIP rewrite via temp file + `shutil.move`).
+- The **audit/event timeline** (`RuntimeEvent` sequence).
+- The schema-version drift warning surfaced through the `aieng_bridge` to the chat panel.
+
+External agents (Claude Code, Codex, MCP clients) reach the workbench through `aieng_freecad_mcp`. For the reproducible end-to-end demo see [`docs/quickstart-vertical-cae-demo.md`](docs/quickstart-vertical-cae-demo.md).
+
 Sixteen registered runtime tools (15 working + 1 skeleton; `cae.run_solver`
 and `freecad.run_macro` are approval-gated):
 
