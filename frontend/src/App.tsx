@@ -5,7 +5,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 
 import { api } from "./api";
-import type { AgentPlan, BenchmarkRun, BenchmarkScenario, CapabilityDescriptor, CapabilityPreview, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeRun, SolverFieldDescriptor, WorkflowDefinition } from "./types";
+import type { AgentPlan, ArtifactResponse, BenchmarkRun, BenchmarkScenario, CapabilityDescriptor, CapabilityPreview, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeRun, SolverFieldDescriptor, WorkflowDefinition } from "./types";
 
 // Status labels for runtime runs
 function runtimeStatusLabel(status: RuntimeRun["status"]): string {
@@ -41,6 +41,7 @@ type ChatHistoryItem = {
   plan?: ChatResponse["plan"];
   errors?: string[];
   auditLogUrl?: string | null;
+  artifactPaths?: string[];
 };
 
 type ViewerLoadState = "idle" | "loading" | "ready" | "error";
@@ -222,6 +223,19 @@ function formatArtifactChanges(run: import("./types").RuntimeRun): string | null
     .filter(Boolean);
   if (paths.length === 0) return null;
   return "变更文件:\n" + paths.map((p) => `  - ${p}`).join("\n");
+}
+
+function extractArtifactPaths(run: import("./types").RuntimeRun): string[] {
+  const allArtifacts = run.tool_results.flatMap((tr) => tr.artifacts ?? []);
+  return allArtifacts
+    .filter((a): a is Record<string, unknown> => typeof a === "object" && a !== null)
+    .map((a) => String(a.path ?? ""))
+    .filter(Boolean);
+}
+
+function isLowRiskArtifactPath(path: string): boolean {
+  const lower = path.toLowerCase();
+  return [".json", ".txt", ".md", ".yaml", ".yml", ".inp", ".csv", ".log"].some((ext) => lower.endsWith(ext));
 }
 
 function projectViewerUrl(project: ProjectRecord | null) {
@@ -707,6 +721,9 @@ export default function App() {
   const [controlPaneMode, setControlPaneMode] = useState<ControlPaneMode>("project");
   const [agentPlan, setAgentPlan] = useState<AgentPlan | null>(null);
   const [agentBusy, setAgentBusy] = useState(false);
+  const [artifactViewerPath, setArtifactViewerPath] = useState("");
+  const [artifactViewerData, setArtifactViewerData] = useState<ArtifactResponse | null>(null);
+  const [artifactViewerBusy, setArtifactViewerBusy] = useState(false);
   const chatLogRef = useRef<HTMLDivElement | null>(null);
   const sidePaneRef = useRef<HTMLElement | null>(null);
 
@@ -1069,6 +1086,7 @@ export default function App() {
       : run.summary
         ? `[本地运行时] ${statusLabel} — ${run.summary}${artifactLine ? "\n" + artifactLine : ""}`
         : `[本地运行时] ${statusLabel}${artifactLine ? "\n" + artifactLine : ""}`;
+    const artifactPaths = extractArtifactPaths(run);
     setChatHistory((current) => [
       ...current,
       {
@@ -1080,6 +1098,7 @@ export default function App() {
         plan: runtimeRunToChatPlan(run),
         errors: run.errors,
         auditLogUrl: null,
+        artifactPaths: artifactPaths.length ? artifactPaths : undefined,
       },
     ]);
   }
@@ -1319,6 +1338,27 @@ export default function App() {
       setNotice({ tone: "error", title: "FRD 提取失败", detail });
     } finally {
       setFrdExtracting(false);
+    }
+  }
+
+  async function viewArtifact(path: string) {
+    if (!selectedId || !path.trim()) return;
+    setArtifactViewerPath(path.trim());
+    setArtifactViewerBusy(true);
+    setArtifactViewerData(null);
+    try {
+      const data = await api.getProjectArtifact(selectedId, path.trim());
+      setArtifactViewerData(data);
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setArtifactViewerData({
+        path: path.trim(),
+        exists: false,
+        media_type: "unknown",
+        warnings: [detail],
+      });
+    } finally {
+      setArtifactViewerBusy(false);
     }
   }
 
@@ -2015,7 +2055,18 @@ export default function App() {
                     {Object.entries(caeSummary.artifact_detection.artifacts).map(([path, present]) => (
                       <div key={path} className={`cae-artifact-item ${present ? "present" : "missing"}`}>
                         <span className="cae-artifact-icon">{present ? "✓" : "✗"}</span>
-                        <span className="cae-artifact-path">{path}</span>
+                        {present && isLowRiskArtifactPath(path) ? (
+                          <button
+                            type="button"
+                            className="cae-artifact-path artifact-link"
+                            onClick={() => void viewArtifact(path)}
+                            title={`查看 ${path}`}
+                          >
+                            {path}
+                          </button>
+                        ) : (
+                          <span className="cae-artifact-path">{path}</span>
+                        )}
                       </div>
                     ))}
                   </div>
@@ -2357,6 +2408,75 @@ export default function App() {
               </div>
             </section>
           )}
+
+          {selectedId ? (
+            <section className="card">
+              <div className="section-heading">
+                <div>
+                  <h2>Artifact Inspector</h2>
+                  <p>Read-only inspection of .aieng package artifacts without opening ZIP files manually.</p>
+                </div>
+              </div>
+
+              <div className="action-row" style={{ gap: 8 }}>
+                <input
+                  type="text"
+                  placeholder="e.g. results/computed_metrics.json"
+                  value={artifactViewerPath}
+                  onChange={(e) => setArtifactViewerPath(e.target.value)}
+                  style={{ flex: 1 }}
+                />
+                <button
+                  disabled={artifactViewerBusy || !artifactViewerPath.trim()}
+                  onClick={() => void viewArtifact(artifactViewerPath)}
+                >
+                  {artifactViewerBusy ? "加载中…" : "查看"}
+                </button>
+              </div>
+
+              {artifactViewerData ? (
+                <div style={{ marginTop: 10 }}>
+                  {!artifactViewerData.exists ? (
+                    <div className="summary-note summary-muted">
+                      <strong>Artifact not found</strong>
+                      <p>Path: {artifactViewerData.path}</p>
+                    </div>
+                  ) : (
+                    <>
+                      <div className="capability-facts" style={{ marginBottom: 8 }}>
+                        <div><span>Path</span><strong>{artifactViewerData.path}</strong></div>
+                        <div><span>Type</span><strong>{artifactViewerData.media_type}</strong></div>
+                        <div><span>Size</span><strong>{artifactViewerData.size_bytes != null ? `${artifactViewerData.size_bytes} bytes` : "-"}</strong></div>
+                      </div>
+                      {artifactViewerData.warnings.length > 0 ? (
+                        <div className="side-effect-list" style={{ marginBottom: 8 }}>
+                          {artifactViewerData.warnings.map((w) => (
+                            <span key={w}>{w}</span>
+                          ))}
+                        </div>
+                      ) : null}
+                      {artifactViewerData.parsed_json != null ? (
+                        <details className="fold-block" open>
+                          <summary className="fold-summary">Parsed JSON</summary>
+                          <pre className="json-block">{JSON.stringify(artifactViewerData.parsed_json, null, 2)}</pre>
+                        </details>
+                      ) : artifactViewerData.text != null ? (
+                        <details className="fold-block" open>
+                          <summary className="fold-summary">Text content</summary>
+                          <pre className="json-block">{artifactViewerData.text}</pre>
+                        </details>
+                      ) : (
+                        <div className="summary-note summary-muted">
+                          <strong>Binary or unreadable content</strong>
+                          <p>This artifact exists but is not displayable as JSON or text.</p>
+                        </div>
+                      )}
+                    </>
+                  )}
+                </div>
+              ) : null}
+            </section>
+          ) : null}
             </>
           ) : null}
 
@@ -2447,6 +2567,22 @@ export default function App() {
                       <div className="chat-error-list">
                         {entry.errors.map((error, index) => (
                           <small key={`${entry.id}-error-${index}`}>{error}</small>
+                        ))}
+                      </div>
+                    ) : null}
+                    {entry.artifactPaths?.length ? (
+                      <div className="chat-artifact-links">
+                        <small>变更证据:</small>
+                        {entry.artifactPaths.filter(isLowRiskArtifactPath).map((path) => (
+                          <button
+                            key={path}
+                            type="button"
+                            className="ghost-button chat-artifact-link"
+                            onClick={() => void viewArtifact(path)}
+                            title={`查看 ${path}`}
+                          >
+                            {path}
+                          </button>
                         ))}
                       </div>
                     ) : null}

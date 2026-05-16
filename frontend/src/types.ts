@@ -528,6 +528,22 @@ export type ChatStep = {
   output?: Record<string, unknown> | null;
 };
 
+export type ArtifactResponse = {
+  path: string;
+  exists: boolean;
+  media_type: string;
+  size_bytes?: number | null;
+  parsed_json?: unknown | null;
+  text?: string | null;
+  warnings: string[];
+};
+
+export type ArtifactDiffResponse = {
+  changed_paths: string[];
+  added_paths: string[];
+  removed_paths: string[];
+};
+
 export type ChatResponse = {
   reply: string;
   plan: ChatStep[];

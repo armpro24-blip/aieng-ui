@@ -1518,3 +1518,42 @@ input[type="file"] {
   color: #94a3b8;
   line-height: 1.5;
 }
+
+.artifact-link {
+  background: transparent;
+  border: none;
+  box-shadow: none;
+  padding: 0;
+  color: #7dd3fc;
+  text-decoration: underline;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.artifact-link:hover {
+  color: #bae6fd;
+}
+
+.chat-artifact-links {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+  margin-top: 6px;
+}
+
+.chat-artifact-links small {
+  color: #9eb1cf;
+  font-size: 11px;
+}
+
+.chat-artifact-link {
+  padding: 4px 8px;
+  border-radius: 6px;
+  font-size: 11px;
+  background: rgba(8, 15, 30, 0.92);
+  border: 1px solid rgba(96, 165, 250, 0.34);
+  color: #dbeafe;
+  box-shadow: none;
+}

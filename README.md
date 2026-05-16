@@ -7,7 +7,7 @@ Web workbench and FastAPI service for the `.aieng` engineering platform.
 `aieng-ui` provides:
 
 - **FastAPI service layer** — project/file management, preview generation, semantic package inspection, CAE artifact detection (`GET /api/projects/{project_id}/cae-artifacts`)
-- **React SPA** — STEP upload, Three.js viewer (GLB/STL), semantic summary panel, honest CAE lifecycle panel (setup / simulation runs / results) with one-click refresh and external metrics import, chat/orchestration panel, audit log, settings drawer
+- **React SPA** — STEP upload, Three.js viewer (GLB/STL), semantic summary panel, honest CAE lifecycle panel (setup / simulation runs / results) with one-click refresh and external metrics import, artifact inspector (read-only JSON/text evidence review), chat/orchestration panel, audit log, settings drawer
 - **Local orchestration runtime** — `RunRecord`, `ToolCall`, `ToolResult`, `RuntimeEvent` types; intent-based plan builder; synchronous executor with approval gate
 - **CAD provider registry** — pluggable `CadProvider` interface; FreeCAD is the first implementation
 
@@ -61,6 +61,12 @@ they exist so a reviewer (or agent) can inspect what the runtime wrote.
 
 Pair the two: capture a JSON artifact before an action, capture it again
 after, then POST both to `/artifact/diff` to surface the structural delta.
+
+The artifact inspector is exposed in the CAE panel of the React SPA: enter an
+artifact path (e.g. `results/computed_metrics.json`) to view parsed JSON or
+text inline. Clickable artifact paths appear in the CAE artifact grid and in
+runtime chat history for low-risk file types (`.json`, `.txt`, `.md`, `.yaml`,
+`.yml`, `.inp`, `.csv`, `.log`).
 
 ## Quickstart
 

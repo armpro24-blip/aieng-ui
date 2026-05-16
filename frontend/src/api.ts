@@ -1,4 +1,4 @@
-import type { AgentPlan, AgentRunResponse, BenchmarkRun, BenchmarkScenario, CaeArtifactDetection, CaePreprocessingSummary, CaeSimulationRunSummary, CapabilityDescriptor, CapabilityPreview, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeEvent, RuntimeRun, RuntimeRunSummary, RuntimeToolInfo, SolverFieldDescriptor, WorkflowDefinition, WorkflowStep } from "./types";
+import type { AgentPlan, AgentRunResponse, ArtifactDiffResponse, ArtifactResponse, BenchmarkRun, BenchmarkScenario, CaeArtifactDetection, CaePreprocessingSummary, CaeSimulationRunSummary, CapabilityDescriptor, CapabilityPreview, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeEvent, RuntimeRun, RuntimeRunSummary, RuntimeToolInfo, SolverFieldDescriptor, WorkflowDefinition, WorkflowStep } from "./types";
 
 const API = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 
@@ -135,4 +135,12 @@ export const api = {
     request<CaePreprocessingSummary>(`/api/projects/${projectId}/cae-preprocessing-summary`),
   getCaeSimulationRunSummary: (projectId: string) =>
     request<CaeSimulationRunSummary>(`/api/projects/${projectId}/cae-simulation-run-summary`),
+  getProjectArtifact: (projectId: string, path: string) =>
+    request<ArtifactResponse>(`/api/projects/${projectId}/artifact?path=${encodeURIComponent(path)}`),
+  diffArtifactJson: (projectId: string, before: unknown, after: unknown) =>
+    request<ArtifactDiffResponse>(`/api/projects/${projectId}/artifact/diff`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ before, after }),
+    }),
 };
