@@ -1,4 +1,4 @@
-import type { CaeArtifactDetection, ChatResponse, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeEvent, RuntimeRun, RuntimeRunSummary, RuntimeToolInfo, SolverFieldDescriptor } from "./types";
+import type { AgentPlan, AgentRunResponse, BenchmarkRun, BenchmarkScenario, CaeArtifactDetection, CapabilityDescriptor, CapabilityPreview, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeEvent, RuntimeRun, RuntimeRunSummary, RuntimeToolInfo, SolverFieldDescriptor, WorkflowDefinition, WorkflowStep } from "./types";
 
 const API = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 
@@ -34,6 +34,52 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }),
+  listCapabilities: () => request<CapabilityDescriptor[]>("/api/capabilities"),
+  previewCapability: (operationName: string, inputs: Record<string, unknown> = {}, approved = false) =>
+    request<CapabilityPreview>("/api/capabilities/preview", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ operation_name: operationName, inputs, approved }),
+    }),
+  listWorkflows: () => request<WorkflowDefinition[]>("/api/runtime/workflows"),
+  planAgent: (payload: {
+    message: string;
+    project_id?: string | null;
+    llm_config?: LLMConfig;
+    patch_json?: Record<string, unknown> | null;
+    dry_run?: boolean;
+  }) =>
+    request<AgentPlan>("/api/agent/plan", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  runAgent: (payload: {
+    message?: string;
+    project_id?: string | null;
+    llm_config?: LLMConfig;
+    patch_json?: Record<string, unknown> | null;
+    dry_run?: boolean;
+    plan?: AgentPlan;
+  }) =>
+    request<AgentRunResponse>("/api/agent/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  listBenchmarkScenarios: () => request<BenchmarkScenario[]>("/api/benchmarks/scenarios"),
+  startBenchmarkRun: (payload: {
+    scenario_id: string;
+    condition?: string;
+    dry_run?: boolean;
+    llm_config: LLMConfig;
+  }) =>
+    request<BenchmarkRun>("/api/benchmarks/runs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    }),
+  getBenchmarkRun: (runId: string) => request<BenchmarkRun>(`/api/benchmarks/runs/${runId}`),
   listProjects: () => request<ProjectRecord[]>("/api/projects"),
   createProject: (name: string) =>
     request<ProjectRecord>("/api/projects", {
@@ -63,7 +109,7 @@ export const api = {
   getFieldDescriptor: (projectId: string, fieldName: string) =>
     request<SolverFieldDescriptor>(`/api/projects/${projectId}/fields/${fieldName}`),
   listRuns: () => request<RuntimeRunSummary[]>("/api/runtime/runs"),
-  startRun: (message: string, projectId?: string | null, toolInput?: Record<string, unknown> | null) =>
+  startRun: (message: string, projectId?: string | null, toolInput?: Record<string, unknown> | null, extras?: { workflow_id?: string; steps?: WorkflowStep[]; llm_config?: LLMConfig }) =>
     request<RuntimeRun>("/api/runtime/runs", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -71,6 +117,9 @@ export const api = {
         message,
         project_id: projectId ?? null,
         ...(toolInput ? { tool_input: toolInput } : {}),
+        ...(extras?.workflow_id ? { workflow_id: extras.workflow_id } : {}),
+        ...(extras?.steps ? { steps: extras.steps } : {}),
+        ...(extras?.llm_config ? { llm_config: extras.llm_config } : {}),
       }),
     }),
   getRun: (runId: string) => request<RuntimeRun>(`/api/runtime/runs/${runId}`),

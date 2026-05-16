@@ -386,7 +386,57 @@ def _execute_steps(
     """
     for i, step in enumerate(steps):
         actual_idx = start_index + i
-        tool_name = step["name"]
+        kind = step.get("kind") or "tool"
+        tool_name = step.get("name") or step.get("tool_name") or step.get("id") or kind
+        step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
+
+        if kind in {"llm", "benchmark", "artifact"}:
+            tc = ToolCall(
+                id=uuid.uuid4().hex[:8],
+                name=str(tool_name),
+                input=step_input,
+                requires_approval=False,
+            )
+            run.tool_calls.append(tc)
+            _emit(run, "tool_started", {"tool": tool_name, "kind": kind})
+            output = {
+                "status": "ok",
+                "kind": kind,
+                "message": step.get("description") or f"{kind} step recorded by workflow runtime.",
+            }
+            run.tool_results.append(ToolResult(id=tc.id, status="success", output=output))
+            _emit(run, "tool_succeeded", {"tool": tool_name, "kind": kind, "artifact_count": 0})
+            continue
+
+        if kind == "approval":
+            if i == 0 and skip_approval_for_first:
+                tc = (
+                    run.tool_calls[actual_idx]
+                    if actual_idx < len(run.tool_calls)
+                    else ToolCall(id=uuid.uuid4().hex[:8], name=str(tool_name), input=step_input, requires_approval=True)
+                )
+                if actual_idx >= len(run.tool_calls):
+                    run.tool_calls.append(tc)
+                run.tool_results.append(
+                    ToolResult(id=tc.id, status="success", output={"status": "approved", "kind": "approval"})
+                )
+                _emit(run, "approval_granted", {"tool": tool_name, "kind": "approval"})
+                continue
+
+            tc = ToolCall(
+                id=uuid.uuid4().hex[:8],
+                name=str(tool_name),
+                input=step_input,
+                requires_approval=True,
+            )
+            run.tool_calls.append(tc)
+            run.tool_results.append(ToolResult(id=tc.id, status="needs_approval"))
+            _emit(run, "approval_required", {"tool": tool_name, "kind": "approval"})
+            run.status = "awaiting_approval"
+            run.pending_step_index = actual_idx
+            run.errors.append(f"{tool_name} requires explicit approval before execution")
+            return
+
         tool_def = _REGISTRY.get(tool_name)
 
         if i == 0 and actual_idx < len(run.tool_calls):
@@ -399,7 +449,7 @@ def _execute_steps(
             tc = ToolCall(
                 id=uuid.uuid4().hex[:8],
                 name=tool_name,
-                input=step["input"],
+                input=step_input,
                 requires_approval=requires_approval,
             )
             run.tool_calls.append(tc)
@@ -428,7 +478,7 @@ def _execute_steps(
 
         _emit(run, "tool_started", {"tool": tool_name})
         try:
-            output = tool_def["handler"](step["input"], {"project_id": run.project_id})
+            output = tool_def["handler"](step_input, {"project_id": run.project_id})
             # Hoist artifacts out of the output dict into ToolResult.artifacts
             artifacts: list[dict[str, Any]] = []
             if isinstance(output, dict):
@@ -490,6 +540,57 @@ def execute_run(run: RunRecord, ctx: dict[str, Any]) -> RunRecord:
         run.summary = (
             f"Completed {success_count}/{len(run.tool_calls)} tool call(s) successfully."
         )
+        run.status = "completed"
+        _emit(run, "run_completed", {"summary": run.summary})
+
+    store_run(run)
+    return run
+
+
+def execute_run_with_plan(run: RunRecord, plan: list[dict[str, Any]], ctx: dict[str, Any] | None = None) -> RunRecord:
+    """Execute an explicit workflow plan instead of using the intent mapper.
+
+    The step shape is intentionally loose so the UI can submit workflow steps
+    with ``kind`` values such as ``tool``, ``llm``, ``benchmark``, ``approval``,
+    and ``artifact``. Only registered runtime tools execute real handlers in
+    this V1 runtime; other step kinds are recorded as auditable workflow events.
+    """
+    ctx = ctx or {}
+    run.status = "running"
+    _emit(run, "run_started", {"message": run.message, "workflow_id": ctx.get("workflow_id")})
+
+    normalized: list[dict[str, Any]] = []
+    for index, step in enumerate(plan):
+        if not isinstance(step, dict):
+            continue
+        tool_name = step.get("name") or step.get("tool_name") or step.get("id") or f"step_{index + 1}"
+        step_input = step.get("input") if isinstance(step.get("input"), dict) else {}
+        normalized.append(
+            {
+                **step,
+                "name": tool_name,
+                "kind": step.get("kind") or "tool",
+                "description": step.get("description") or str(tool_name),
+                "input": step_input,
+            }
+        )
+
+    tool_input = ctx.get("tool_input")
+    if isinstance(tool_input, dict):
+        for step in normalized:
+            if step.get("kind") in {"tool", "mcp_tool"}:
+                merged = dict(step.get("input") or {})
+                merged.update(tool_input)
+                step["input"] = merged
+
+    run.plan = normalized
+    _emit(run, "plan_created", {"steps": [s["name"] for s in normalized], "workflow_id": ctx.get("workflow_id")})
+
+    _execute_steps(run, normalized, start_index=0, skip_approval_for_first=False)
+
+    if run.status == "running":
+        success_count = sum(1 for r in run.tool_results if r.status == "success")
+        run.summary = f"Completed {success_count}/{len(run.tool_calls)} workflow step(s) successfully."
         run.status = "completed"
         _emit(run, "run_completed", {"summary": run.summary})
 

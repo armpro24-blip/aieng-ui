@@ -280,6 +280,130 @@ export type RuntimeToolInfo = {
   description: string;
 };
 
+export type CapabilityDescriptor = {
+  name: string;
+  source: string;
+  category: string;
+  purpose: string;
+  required_inputs: string[];
+  optional_inputs: string[];
+  mutates_cad: boolean;
+  mutates_package: boolean;
+  may_update_claim_map: boolean;
+  runtime_requirements: string[];
+  dry_run_support: string;
+  side_effects: string[];
+  claim_policy: Record<string, unknown>;
+  available: boolean;
+  unavailable_reason?: string | null;
+};
+
+export type CapabilityPreview = {
+  status: string;
+  operation_name: string;
+  capability?: CapabilityDescriptor;
+  approval_required?: boolean;
+  blocked?: boolean;
+  preview?: {
+    operation_name: string;
+    would_write_artifacts: string[];
+    would_update_evidence: boolean;
+    would_update_traces: boolean;
+    would_touch_claims: boolean;
+    guard_checks_required: string[];
+    unavailable_runtime_blocks: string[];
+    expected_duration_estimate: string;
+    warnings: string[];
+  } | null;
+  errors?: string[];
+};
+
+export type WorkflowStep = {
+  id: string;
+  kind: "tool" | "mcp_tool" | "llm" | "approval" | "benchmark" | "artifact" | string;
+  tool_name?: string;
+  description?: string;
+  input?: Record<string, unknown>;
+  status: string;
+  preview?: Record<string, unknown> | null;
+  approval_required?: boolean;
+  artifacts?: unknown[];
+  errors?: string[];
+};
+
+export type WorkflowDefinition = {
+  id: string;
+  title: string;
+  description: string;
+  required_context: string[];
+  steps: WorkflowStep[];
+};
+
+export type LLMConfig = {
+  provider: string;
+  model: string;
+  base_url?: string | null;
+  api_key_env?: string | null;
+  temperature: number;
+  top_p: number;
+  max_output_tokens: number;
+  input_price_per_million_tokens?: number | null;
+  output_price_per_million_tokens?: number | null;
+};
+
+export type BenchmarkScenario = {
+  id: string;
+  name: string;
+  path: string;
+  question_file: string;
+  condition_a_path: string;
+  condition_b_index: string;
+  condition_b_source: string;
+  has_condition_b_package: boolean;
+  has_condition_b_contents: boolean;
+  rubric_file: string;
+  schema_file: string;
+};
+
+export type BenchmarkRun = {
+  run_id: string;
+  status: string;
+  scenario_id: string;
+  dry_run: boolean;
+  created_at: string;
+  result: Record<string, unknown>;
+  result_path?: string | null;
+  events: Array<{ id: string; type: string; timestamp: string; payload?: unknown }>;
+  warnings: string[];
+  errors?: string[];
+};
+
+export type AgentPlan = {
+  reply: string;
+  mode: "llm" | "heuristic" | string;
+  message: string;
+  project_id?: string | null;
+  steps: WorkflowStep[];
+  requires_approval: boolean;
+  preview: {
+    step_count: number;
+    tools: string[];
+    would_execute: string[];
+    approval_gated: string[];
+    side_effects: string[];
+    warnings: string[];
+  };
+  warnings: string[];
+  errors: string[];
+  llm_raw?: string | null;
+  llm_config?: Record<string, unknown>;
+};
+
+export type AgentRunResponse = {
+  agent: AgentPlan;
+  run: RuntimeRun;
+};
+
 export type ChatStep = {
   tool: string;
   description: string;

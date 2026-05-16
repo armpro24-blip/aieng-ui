@@ -5,7 +5,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 
 import { api } from "./api";
-import type { ChatResponse, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeRun, SolverFieldDescriptor } from "./types";
+import type { AgentPlan, BenchmarkRun, BenchmarkScenario, CapabilityDescriptor, CapabilityPreview, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeRun, SolverFieldDescriptor, WorkflowDefinition } from "./types";
 
 // Status labels for runtime runs
 function runtimeStatusLabel(status: RuntimeRun["status"]): string {
@@ -44,6 +44,7 @@ type ChatHistoryItem = {
 };
 
 type ViewerLoadState = "idle" | "loading" | "ready" | "error";
+type ControlPaneMode = "project" | "agent" | "cae" | "chat";
 
 const BASE_STAGES: StageItem[] = [
   { key: "upload", label: "上传 STEP", detail: "把用户选择的 STEP 文件放入项目", state: "idle" },
@@ -58,6 +59,25 @@ const CHAT_SUGGESTIONS = [
   "检查当前包是否已经具备执行 patch 的前提",
   "给出减重但不破坏受保护区域的安全步骤",
 ] as const;
+
+const DEFAULT_LLM_CONFIG: LLMConfig = {
+  provider: "openai-compatible",
+  model: "configured-model",
+  base_url: "",
+  api_key_env: "OPENAI_API_KEY",
+  temperature: 0,
+  top_p: 1,
+  max_output_tokens: 8192,
+  input_price_per_million_tokens: null,
+  output_price_per_million_tokens: null,
+};
+
+const CONTROL_PANE_MODES: Array<{ id: ControlPaneMode; label: string; detail: string }> = [
+  { id: "project", label: "项目", detail: "导入与语义摘要" },
+  { id: "agent", label: "Agent", detail: "能力与工作流" },
+  { id: "cae", label: "CAE", detail: "证据与结果" },
+  { id: "chat", label: "对话", detail: "计划与审批" },
+];
 
 function jsonBlock(value: unknown) {
   return JSON.stringify(value ?? null, null, 2);
@@ -119,6 +139,24 @@ function caeModeClass(mode: string) {
   if (mode === "cae_result") return "mode-cae-result";
   if (mode === "cae_validation") return "mode-cae-validation";
   return "";
+}
+
+function mutabilityLabel(capability: CapabilityDescriptor) {
+  const parts = [];
+  if (capability.mutates_cad) parts.push("CAD");
+  if (capability.mutates_package) parts.push(".aieng");
+  if (capability.may_update_claim_map) parts.push("claim");
+  return parts.length ? parts.join(" + ") : "read-only";
+}
+
+function workflowStepLabel(kind: string) {
+  if (kind === "tool") return "runtime tool";
+  if (kind === "mcp_tool") return "MCP tool";
+  if (kind === "llm") return "LLM";
+  if (kind === "approval") return "approval";
+  if (kind === "benchmark") return "benchmark";
+  if (kind === "artifact") return "artifact";
+  return kind;
 }
 
 function formatRecordSummary(record: Record<string, unknown>) {
@@ -290,6 +328,19 @@ function ModelViewer({
     status: "idle",
     detail: "等待生成预览资产",
   });
+  const fieldDescriptorKey = fieldDescriptor
+    ? [
+        fieldDescriptor.project_id,
+        fieldDescriptor.field_name,
+        fieldDescriptor.format,
+        fieldDescriptor.basis ?? "",
+        fieldDescriptor.colormap ?? "",
+        fieldDescriptor.min_value,
+        fieldDescriptor.max_value,
+        fieldDescriptor.unit ?? "",
+        fieldDescriptor.source ?? "",
+      ].join("|")
+    : "";
 
   useEffect(() => {
     if (!hostRef.current) return;
@@ -418,7 +469,7 @@ function ModelViewer({
       renderer.dispose();
       host.innerHTML = "";
     };
-  }, [assetFormat, assetUrl, fieldDescriptor]);
+  }, [assetFormat, assetUrl, fieldDescriptorKey]);
 
   return (
     <div className="viewer-canvas-shell">
@@ -637,11 +688,51 @@ export default function App() {
   const [metricsLoadCaseId, setMetricsLoadCaseId] = useState("load_case_001");
   const [metricsSoftware, setMetricsSoftware] = useState("");
   const [metricsImporting, setMetricsImporting] = useState(false);
+  const [capabilities, setCapabilities] = useState<CapabilityDescriptor[]>([]);
+  const [capabilityCategory, setCapabilityCategory] = useState("all");
+  const [capabilityQuery, setCapabilityQuery] = useState("");
+  const [selectedCapabilityName, setSelectedCapabilityName] = useState<string>("");
+  const [capabilityPreview, setCapabilityPreview] = useState<CapabilityPreview | null>(null);
+  const [workflows, setWorkflows] = useState<WorkflowDefinition[]>([]);
+  const [selectedWorkflowId, setSelectedWorkflowId] = useState("");
+  const [benchmarkScenarios, setBenchmarkScenarios] = useState<BenchmarkScenario[]>([]);
+  const [selectedScenarioId, setSelectedScenarioId] = useState("");
+  const [benchmarkRun, setBenchmarkRun] = useState<BenchmarkRun | null>(null);
+  const [benchmarkBusy, setBenchmarkBusy] = useState(false);
+  const [llmConfig, setLlmConfig] = useState<LLMConfig>(DEFAULT_LLM_CONFIG);
+  const [controlPaneMode, setControlPaneMode] = useState<ControlPaneMode>("project");
+  const [agentPlan, setAgentPlan] = useState<AgentPlan | null>(null);
+  const [agentBusy, setAgentBusy] = useState(false);
   const chatLogRef = useRef<HTMLDivElement | null>(null);
+  const sidePaneRef = useRef<HTMLElement | null>(null);
 
   const selectedProject = useMemo(
     () => projects.find((item) => item.id === selectedId) ?? null,
     [projects, selectedId],
+  );
+  const capabilityCategories = useMemo(() => {
+    const values = Array.from(new Set(capabilities.map((item) => item.category))).sort();
+    return ["all", ...values];
+  }, [capabilities]);
+  const filteredCapabilities = useMemo(() => {
+    const query = capabilityQuery.trim().toLowerCase();
+    return capabilities.filter((item) => {
+      const categoryOk = capabilityCategory === "all" || item.category === capabilityCategory;
+      const queryOk =
+        !query ||
+        item.name.toLowerCase().includes(query) ||
+        item.purpose.toLowerCase().includes(query) ||
+        item.source.toLowerCase().includes(query);
+      return categoryOk && queryOk;
+    });
+  }, [capabilities, capabilityCategory, capabilityQuery]);
+  const selectedCapability = useMemo(
+    () => capabilities.find((item) => item.name === selectedCapabilityName) ?? filteredCapabilities[0] ?? null,
+    [capabilities, filteredCapabilities, selectedCapabilityName],
+  );
+  const selectedWorkflow = useMemo(
+    () => workflows.find((item) => item.id === selectedWorkflowId) ?? workflows[0] ?? null,
+    [workflows, selectedWorkflowId],
   );
   const fallbackViewerUrl = useMemo(() => projectViewerUrl(selectedProject), [selectedProject]);
   const rawViewerUrl = summary?.viewer_url ?? fallbackViewerUrl;
@@ -691,12 +782,47 @@ export default function App() {
   }
 
   useEffect(() => {
+    let cancelled = false;
+
     void (async () => {
       const runtimeSnapshot = await api.runtime();
+      if (cancelled) return;
       setRuntime(runtimeSnapshot);
       setRuntimeDraft(runtimeSnapshot.config);
-      await refreshProjects(undefined, runtimeSnapshot);
+      const [nextCapabilities, nextWorkflows, nextScenarios] = await Promise.all([
+        api.listCapabilities().catch(() => []),
+        api.listWorkflows().catch(() => []),
+        api.listBenchmarkScenarios().catch(() => []),
+      ]);
+      if (cancelled) return;
+      setCapabilities(nextCapabilities);
+      setSelectedCapabilityName(nextCapabilities[0]?.name ?? "");
+      setWorkflows(nextWorkflows);
+      setSelectedWorkflowId(nextWorkflows[0]?.id ?? "");
+      setBenchmarkScenarios(nextScenarios);
+      setSelectedScenarioId(nextScenarios[0]?.id ?? "");
+      const list = await api.listProjects();
+      if (cancelled) return;
+      setProjects(list);
+      const candidate = list[0]?.id ?? null;
+      setSelectedId(candidate);
+      if (candidate) {
+        try {
+          const nextSummary = await api.getProject(candidate);
+          if (!cancelled) setSummary(nextSummary);
+        } catch {
+          if (cancelled) return;
+          const project = list.find((item) => item.id === candidate) ?? null;
+          setSummary(project ? buildFallbackSummary(project, runtimeSnapshot) : null);
+        }
+      } else {
+        setSummary(null);
+      }
     })();
+
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   useEffect(() => {
@@ -884,7 +1010,26 @@ export default function App() {
     }
     let cancelled = false;
     void api.getFieldDescriptor(selectedId, selectedCaeField)
-      .then((desc) => { if (!cancelled) setFieldDescriptor(desc); })
+      .then((desc) => {
+        if (cancelled) return;
+        setFieldDescriptor((current) => {
+          if (
+            current &&
+            current.project_id === desc.project_id &&
+            current.field_name === desc.field_name &&
+            current.format === desc.format &&
+            current.basis === desc.basis &&
+            current.colormap === desc.colormap &&
+            current.min_value === desc.min_value &&
+            current.max_value === desc.max_value &&
+            current.unit === desc.unit &&
+            current.source === desc.source
+          ) {
+            return current;
+          }
+          return desc;
+        });
+      })
       .catch(() => { if (!cancelled) setFieldDescriptor(null); });
     return () => { cancelled = true; };
   }, [selectedId, selectedCaeField, hasCaeContext]);
@@ -897,6 +1042,10 @@ export default function App() {
     if (!chatLogRef.current) return;
     chatLogRef.current.scrollTop = chatLogRef.current.scrollHeight;
   }, [chatHistory]);
+
+  useEffect(() => {
+    sidePaneRef.current?.scrollTo({ top: 0 });
+  }, [controlPaneMode]);
 
   function appendRunToChatHistory(run: RuntimeRun) {
     const statusLabel = runtimeStatusLabel(run.status);
@@ -929,6 +1078,88 @@ export default function App() {
         auditLogUrl: null,
       },
     ]);
+  }
+
+  async function refreshAgentWorkbench() {
+    await runBusyTask(async () => {
+      const [nextCapabilities, nextWorkflows, nextScenarios] = await Promise.all([
+        api.listCapabilities(),
+        api.listWorkflows(),
+        api.listBenchmarkScenarios(),
+      ]);
+      setCapabilities(nextCapabilities);
+      setWorkflows(nextWorkflows);
+      setBenchmarkScenarios(nextScenarios);
+      setSelectedCapabilityName((current) => current || nextCapabilities[0]?.name || "");
+      setSelectedWorkflowId((current) => current || nextWorkflows[0]?.id || "");
+      setSelectedScenarioId((current) => current || nextScenarios[0]?.id || "");
+      setNotice({ tone: "success", title: "Agent 工作台已刷新", detail: "能力注册表、工作流和 benchmark 场景已重新读取。" });
+    });
+  }
+
+  async function previewSelectedCapability(approved = false) {
+    if (!selectedCapability) return;
+    await runBusyTask(async () => {
+      const preview = await api.previewCapability(
+        selectedCapability.name,
+        selectedId ? { project_id: selectedId } : {},
+        approved,
+      );
+      setCapabilityPreview(preview);
+      setNotice({
+        tone: preview.status === "success" ? "success" : "info",
+        title: preview.approval_required ? "需要审批" : "能力预览完成",
+        detail: preview.preview?.warnings?.[0] || preview.errors?.[0] || `${selectedCapability.name} preview ready.`,
+      });
+    });
+  }
+
+  async function runSelectedWorkflow() {
+    if (!selectedWorkflow) return;
+    const workflowMessage = `run workflow ${selectedWorkflow.id}`;
+    await runBusyTask(async () => {
+      const run = await api.startRun(workflowMessage, selectedId ?? null, selectedId ? { project_id: selectedId } : null, {
+        workflow_id: selectedWorkflow.id,
+        steps: selectedWorkflow.steps,
+        llm_config: llmConfig,
+      });
+      setLastRuntimeRun(run);
+      appendRunToChatHistory(run);
+      setNotice({
+        tone: run.status === "completed" ? "success" : run.status === "awaiting_approval" ? "info" : "error",
+        title: `工作流 — ${runtimeStatusLabel(run.status)}`,
+        detail: run.summary || run.errors[0] || selectedWorkflow.title,
+      });
+    });
+  }
+
+  function updateLlmConfig<K extends keyof LLMConfig>(key: K, value: LLMConfig[K]) {
+    setLlmConfig((current) => ({ ...current, [key]: value }));
+  }
+
+  async function runBenchmark(dryRun: boolean) {
+    if (!selectedScenarioId || benchmarkBusy) return;
+    setBenchmarkBusy(true);
+    setNotice(null);
+    try {
+      const run = await api.startBenchmarkRun({
+        scenario_id: selectedScenarioId,
+        condition: "both",
+        dry_run: dryRun,
+        llm_config: llmConfig,
+      });
+      setBenchmarkRun(run);
+      setNotice({
+        tone: run.status === "completed" ? "success" : "error",
+        title: dryRun ? "Benchmark dry-run 完成" : "Benchmark 运行完成",
+        detail: run.errors?.[0] || run.warnings[0] || run.result_path || run.run_id,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setNotice({ tone: "error", title: "Benchmark 运行失败", detail });
+    } finally {
+      setBenchmarkBusy(false);
+    }
   }
 
   async function submitRuntime() {
@@ -1070,6 +1301,85 @@ export default function App() {
     });
   }
 
+  async function planAgentChat() {
+    const prompt = message.trim();
+    if (!prompt) {
+      setNotice({ tone: "info", title: "请输入 Agent 目标", detail: "Agent 需要一条建模、检查或分析目标。" });
+      return;
+    }
+    setAgentBusy(true);
+    setNotice(null);
+    try {
+      const plan = await api.planAgent({
+        message: prompt,
+        project_id: selectedId ?? null,
+        llm_config: llmConfig,
+        dry_run: false,
+      });
+      setAgentPlan(plan);
+      setChatHistory((current) => [
+        ...current,
+        { id: createChatId(), role: "user", body: prompt, createdAt: new Date().toISOString(), mode: "plan" },
+        {
+          id: createChatId(),
+          role: "assistant",
+          body: `[Agent ${plan.mode}] ${plan.reply}`,
+          createdAt: new Date().toISOString(),
+          mode: "runtime",
+          plan: plan.steps.map((step) => ({
+            tool: step.tool_name ?? step.id,
+            description: step.description || step.tool_name || step.id,
+            status: step.approval_required ? "needs_approval" : "pending",
+            inputs: step.input ?? {},
+            output: null,
+          })),
+          errors: [...(plan.errors ?? []), ...(plan.warnings ?? [])],
+        },
+      ]);
+      setNotice({
+        tone: plan.errors?.length ? "info" : "success",
+        title: "Agent 计划已生成",
+        detail: plan.preview.warnings[0] || `${plan.steps.length} 个步骤，${plan.requires_approval ? "包含审批闸门" : "无需审批"}`,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setNotice({ tone: "error", title: "Agent 计划失败", detail });
+    } finally {
+      setAgentBusy(false);
+    }
+  }
+
+  async function runAgentChat() {
+    const prompt = message.trim();
+    if (!prompt && !agentPlan) {
+      setNotice({ tone: "info", title: "请输入 Agent 目标", detail: "可以先生成计划，也可以直接运行 Agent。" });
+      return;
+    }
+    setAgentBusy(true);
+    setNotice(null);
+    try {
+      const result = await api.runAgent({
+        message: prompt || agentPlan?.message,
+        project_id: selectedId ?? agentPlan?.project_id ?? null,
+        llm_config: llmConfig,
+        plan: agentPlan ?? undefined,
+      });
+      setAgentPlan(result.agent);
+      setLastRuntimeRun(result.run);
+      appendRunToChatHistory(result.run);
+      setNotice({
+        tone: result.run.status === "completed" ? "success" : result.run.status === "awaiting_approval" ? "info" : "error",
+        title: `Agent 运行 — ${runtimeStatusLabel(result.run.status)}`,
+        detail: result.run.summary || result.run.errors[0] || result.agent.preview.warnings[0] || result.agent.reply,
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setNotice({ tone: "error", title: "Agent 运行失败", detail });
+    } finally {
+      setAgentBusy(false);
+    }
+  }
+
   async function submitChat(mode: "plan" | "execute") {
     if (!selectedId) return;
     const prompt = message.trim();
@@ -1170,7 +1480,42 @@ export default function App() {
           </div>
         </section>
 
-        <aside className="side-pane">
+        <aside className="side-pane" ref={sidePaneRef}>
+          <div className="control-pane-header">
+            <div>
+              <span className="control-pane-kicker">Workbench Control</span>
+              <strong>{CONTROL_PANE_MODES.find((mode) => mode.id === controlPaneMode)?.detail}</strong>
+            </div>
+            <button type="button" className="ghost-button compact-button" onClick={() => setSettingsOpen(true)}>
+              环境
+            </button>
+          </div>
+
+          <div className="control-pane-tabs" role="tablist" aria-label="Workbench control sections">
+            {CONTROL_PANE_MODES.map((mode) => (
+              <button
+                key={mode.id}
+                type="button"
+                role="tab"
+                aria-selected={controlPaneMode === mode.id}
+                className={controlPaneMode === mode.id ? "control-pane-tab active" : "control-pane-tab"}
+                onClick={() => setControlPaneMode(mode.id)}
+              >
+                <strong>{mode.label}</strong>
+                <span>{mode.detail}</span>
+              </button>
+            ))}
+          </div>
+
+          {notice ? (
+            <div className={`result-banner result-${notice.tone} control-status-banner`}>
+              <strong>{notice.title}</strong>
+              <span>{notice.detail}</span>
+            </div>
+          ) : null}
+
+          {controlPaneMode === "project" ? (
+            <>
           <section className="card workbench-entry-card">
             <div className="section-heading">
               <div>
@@ -1242,12 +1587,6 @@ export default function App() {
               ))}
             </div>
 
-            {notice ? (
-              <div className={`result-banner result-${notice.tone}`}>
-                <strong>{notice.title}</strong>
-                <span>{notice.detail}</span>
-              </div>
-            ) : null}
           </section>
 
           <section className="card">
@@ -1365,7 +1704,253 @@ export default function App() {
             ))}
             <JsonDisclosure title="查看集成与预览元数据" body={integrationBody} />
           </section>
+            </>
+          ) : null}
 
+          {controlPaneMode === "agent" ? (
+            <>
+          <section className="card agent-workbench-card">
+            <div className="section-heading">
+              <div>
+                <h2>Capability Browser</h2>
+                <p>统一查看 runtime、MCP、.aieng 包工具和 benchmark 能力，先看副作用，再决定是否进入流程。</p>
+              </div>
+              <button className="ghost-button" type="button" disabled={busy} onClick={() => void refreshAgentWorkbench()}>
+                刷新能力
+              </button>
+            </div>
+
+            <div className="capability-toolbar">
+              <select value={capabilityCategory} onChange={(event) => setCapabilityCategory(event.target.value)}>
+                {capabilityCategories.map((category) => (
+                  <option key={category} value={category}>
+                    {category === "all" ? "all categories" : category}
+                  </option>
+                ))}
+              </select>
+              <input
+                value={capabilityQuery}
+                onChange={(event) => setCapabilityQuery(event.target.value)}
+                placeholder="搜索 tool / source / purpose"
+              />
+            </div>
+
+            <div className="capability-browser">
+              <div className="capability-list">
+                {filteredCapabilities.slice(0, 40).map((capability) => (
+                  <button
+                    type="button"
+                    key={`${capability.source}-${capability.name}`}
+                    className={capability.name === selectedCapability?.name ? "capability-item active" : "capability-item"}
+                    onClick={() => {
+                      setSelectedCapabilityName(capability.name);
+                      setCapabilityPreview(null);
+                    }}
+                  >
+                    <strong>{capability.name}</strong>
+                    <span>{capability.category} / {capability.source}</span>
+                  </button>
+                ))}
+              </div>
+
+              <div className="capability-detail">
+                {selectedCapability ? (
+                  <>
+                    <div className="capability-detail-head">
+                      <div>
+                        <strong>{selectedCapability.name}</strong>
+                        <span>{selectedCapability.purpose}</span>
+                      </div>
+                      <small className={selectedCapability.available ? "capability-available" : "capability-missing"}>
+                        {selectedCapability.available ? "available" : "unavailable"}
+                      </small>
+                    </div>
+                    <div className="capability-facts">
+                      <div><span>Mutability</span><strong>{mutabilityLabel(selectedCapability)}</strong></div>
+                      <div><span>Dry-run</span><strong>{selectedCapability.dry_run_support}</strong></div>
+                      <div><span>Runtime</span><strong>{selectedCapability.runtime_requirements.join(", ") || "none"}</strong></div>
+                      <div><span>Inputs</span><strong>{selectedCapability.required_inputs.length} required</strong></div>
+                    </div>
+                    {selectedCapability.unavailable_reason ? (
+                      <div className="summary-note summary-muted">
+                        <strong>Capability gap</strong>
+                        <p>{selectedCapability.unavailable_reason}</p>
+                      </div>
+                    ) : null}
+                    {selectedCapability.side_effects.length ? (
+                      <div className="side-effect-list">
+                        {selectedCapability.side_effects.map((effect) => (
+                          <span key={effect}>{effect}</span>
+                        ))}
+                      </div>
+                    ) : null}
+                    <div className="action-row">
+                      <button disabled={busy} onClick={() => void previewSelectedCapability(false)}>
+                        Preview
+                      </button>
+                      <button className="ghost-button" disabled={busy} onClick={() => void previewSelectedCapability(true)}>
+                        Preview as approved
+                      </button>
+                    </div>
+                    {capabilityPreview ? (
+                      <JsonDisclosure title="查看 capability preview" body={jsonBlock(capabilityPreview)} defaultOpen />
+                    ) : null}
+                  </>
+                ) : (
+                  <div className="summary-note summary-muted">
+                    <strong>暂无能力</strong>
+                    <p>后端未返回 capability registry。请检查 aieng 和 freecad-mcp 路径配置。</p>
+                  </div>
+                )}
+              </div>
+            </div>
+          </section>
+
+          <section className="card">
+            <div className="section-heading">
+              <div>
+                <h2>Agent Flow Panel</h2>
+                <p>把一组工具、LLM、benchmark、审批和 artifact 步骤作为可审计 workflow 运行。</p>
+              </div>
+            </div>
+
+            <label className="form-field">
+              <span>Workflow</span>
+              <select value={selectedWorkflow?.id ?? ""} onChange={(event) => setSelectedWorkflowId(event.target.value)}>
+                {workflows.map((workflow) => (
+                  <option key={workflow.id} value={workflow.id}>
+                    {workflow.title}
+                  </option>
+                ))}
+              </select>
+            </label>
+
+            {selectedWorkflow ? (
+              <>
+                <div className="summary-note summary-muted">
+                  <strong>{selectedWorkflow.title}</strong>
+                  <p>{selectedWorkflow.description}</p>
+                </div>
+                <div className="workflow-step-list">
+                  {selectedWorkflow.steps.map((step) => (
+                    <div key={step.id} className="workflow-step-item">
+                      <span>{workflowStepLabel(step.kind)}</span>
+                      <strong>{step.tool_name ?? step.id}</strong>
+                      {step.approval_required ? <small>approval required</small> : null}
+                    </div>
+                  ))}
+                </div>
+                <div className="action-row">
+                  <button disabled={busy || !selectedWorkflow} onClick={() => void runSelectedWorkflow()}>
+                    运行选中工作流
+                  </button>
+                </div>
+              </>
+            ) : (
+              <div className="summary-note summary-muted">
+                <strong>暂无 workflow</strong>
+                <p>后端未返回工作流定义。</p>
+              </div>
+            )}
+          </section>
+
+          <section className="card">
+            <div className="section-heading">
+              <div>
+                <h2>Benchmark Panel</h2>
+                <p>复用 aieng benchmark runner，支持 dry-run 估算和真实 LLM A/B 运行。</p>
+              </div>
+            </div>
+
+            <div className="runtime-config-grid">
+              <label className="form-field">
+                <span>Scenario</span>
+                <select value={selectedScenarioId} onChange={(event) => setSelectedScenarioId(event.target.value)}>
+                  {benchmarkScenarios.map((scenario) => (
+                    <option key={scenario.id} value={scenario.id}>
+                      {scenario.name}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="form-field">
+                <span>Provider</span>
+                <select value={llmConfig.provider} onChange={(event) => updateLlmConfig("provider", event.target.value)}>
+                  <option value="openai-compatible">openai-compatible</option>
+                  <option value="anthropic">anthropic</option>
+                </select>
+              </label>
+              <label className="form-field">
+                <span>Model</span>
+                <input value={llmConfig.model} onChange={(event) => updateLlmConfig("model", event.target.value)} />
+              </label>
+              <label className="form-field">
+                <span>API key env</span>
+                <input value={llmConfig.api_key_env ?? ""} onChange={(event) => updateLlmConfig("api_key_env", event.target.value)} />
+              </label>
+              <label className="form-field runtime-config-span">
+                <span>Base URL</span>
+                <input value={llmConfig.base_url ?? ""} onChange={(event) => updateLlmConfig("base_url", event.target.value)} />
+              </label>
+            </div>
+
+            <div className="action-row runtime-config-actions">
+              <button disabled={benchmarkBusy || !selectedScenarioId} onClick={() => void runBenchmark(true)}>
+                Dry-run / 成本估算
+              </button>
+              <button className="ghost-button" disabled={benchmarkBusy || !selectedScenarioId} onClick={() => void runBenchmark(false)}>
+                真实运行 benchmark
+              </button>
+            </div>
+
+            {benchmarkRun ? (
+              <div className="benchmark-result">
+                <div className="capability-facts">
+                  <div><span>Run</span><strong>{benchmarkRun.run_id}</strong></div>
+                  <div><span>Status</span><strong>{benchmarkRun.status}</strong></div>
+                  <div><span>Mode</span><strong>{benchmarkRun.dry_run ? "dry-run" : "run"}</strong></div>
+                  <div><span>Result</span><strong>{benchmarkRun.result_path ?? "-"}</strong></div>
+                </div>
+                {benchmarkRun.warnings.length ? (
+                  <div className="side-effect-list">
+                    {benchmarkRun.warnings.map((warning) => <span key={warning}>{warning}</span>)}
+                  </div>
+                ) : null}
+                <JsonDisclosure title="查看 benchmark run payload" body={jsonBlock(benchmarkRun)} />
+              </div>
+            ) : null}
+          </section>
+
+          <section className="card">
+            <div className="section-heading">
+              <div>
+                <h2>Semantic Map</h2>
+                <p>把 .aieng 资源按可用、缺失和证据链状态压缩成一个扫描视图。</p>
+              </div>
+            </div>
+            <div className="semantic-map-grid">
+              {[
+                ["manifest", Boolean(summary?.manifest)],
+                ["feature_graph", Boolean(summary?.feature_graph)],
+                ["topology", Boolean(summary?.topology)],
+                ["constraints", Boolean(summary?.constraints)],
+                ["validation", Boolean(summary?.validation)],
+                ["ai_summary", Boolean(summary?.ai_summary)],
+                ["cae_context", Boolean(summary?.cae?.present)],
+                ["result_summary", Boolean(summary?.cae?.result_summary)],
+              ].map(([label, present]) => (
+                <div key={String(label)} className={present ? "semantic-map-item present" : "semantic-map-item missing"}>
+                  <span>{String(label)}</span>
+                  <strong>{present ? "present" : "missing"}</strong>
+                </div>
+              ))}
+            </div>
+          </section>
+            </>
+          ) : null}
+
+          {controlPaneMode === "cae" ? (
+            <>
           {summary ? (
             <section className="card">
               <div className="section-heading">
@@ -1626,15 +2211,78 @@ export default function App() {
                 </>
               ) : null}
             </section>
+          ) : (
+            <section className="card">
+              <div className="section-heading">
+                <div>
+                  <h2>CAE Artifact Status</h2>
+                  <p>选择或创建项目后，这里会显示 CAE 证据、约束、载荷和结果摘要。</p>
+                </div>
+              </div>
+              <div className="summary-note summary-muted">
+                <strong>暂无项目上下文</strong>
+                <p>当前没有选中项目，CAE 面板暂时没有可审计资源。</p>
+              </div>
+            </section>
+          )}
+            </>
           ) : null}
 
+          {controlPaneMode === "chat" ? (
           <section className="card">
             <div className="section-heading">
               <div>
-                <h2>智能编排</h2>
-                <p>把现有的 plan/execute API 收拢成真正的聊天窗，保留会话上下文、步骤回显和审计入口。</p>
+                <h2>Agent Chat</h2>
+                <p>自然语言先变成可审阅计划，再由后端白名单工具、MCP preflight 和审批闸门执行。</p>
               </div>
             </div>
+
+            <div className="agent-chat-strip">
+              <div>
+                <strong>{agentPlan ? `当前计划：${agentPlan.steps.length} steps / ${agentPlan.mode}` : "对话建模入口"}</strong>
+                <span>
+                  {agentPlan
+                    ? agentPlan.preview.warnings[0] || (agentPlan.requires_approval ? "包含审批步骤" : "当前计划不需要审批")
+                    : "可以直接描述建模目标；没有 LLM key 时会使用本地启发式 planner。"}
+                </span>
+              </div>
+              <div className="agent-chat-actions">
+                <button disabled={agentBusy} onClick={() => void planAgentChat()}>
+                  生成 Agent 计划
+                </button>
+                <button className="ghost-button" disabled={agentBusy} onClick={() => void runAgentChat()}>
+                  执行 Agent 计划
+                </button>
+              </div>
+            </div>
+
+            {agentPlan ? (
+              <div className="agent-plan-preview">
+                <div className="capability-facts">
+                  <div><span>Mode</span><strong>{agentPlan.mode}</strong></div>
+                  <div><span>Steps</span><strong>{agentPlan.preview.step_count}</strong></div>
+                  <div><span>Approval</span><strong>{agentPlan.requires_approval ? "required" : "not required"}</strong></div>
+                  <div><span>Project</span><strong>{agentPlan.project_id ?? "-"}</strong></div>
+                </div>
+                <div className="workflow-step-list compact-list">
+                  {agentPlan.steps.map((step) => (
+                    <div key={step.id} className="workflow-step-item">
+                      <span>{workflowStepLabel(step.kind)}</span>
+                      <strong>{step.tool_name ?? step.id}</strong>
+                      {step.approval_required ? <small>approval</small> : null}
+                    </div>
+                  ))}
+                </div>
+                {agentPlan.preview.warnings.length || agentPlan.errors.length ? (
+                  <div className="side-effect-list">
+                    {[...agentPlan.preview.warnings, ...agentPlan.errors].map((warning) => (
+                      <span key={warning}>{warning}</span>
+                    ))}
+                  </div>
+                ) : null}
+                <JsonDisclosure title="查看 Agent plan payload" body={jsonBlock(agentPlan)} />
+              </div>
+            ) : null}
 
             <div className="chat-suggestion-row">
               {CHAT_SUGGESTIONS.map((suggestion) => (
@@ -1687,14 +2335,14 @@ export default function App() {
 
             <textarea rows={4} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="例如：总结当前模型并给出下一步可执行的安全操作。" />
             <div className="action-row">
-              <button disabled={!selectedId || busy} onClick={() => void submitChat("plan")}>
-                发送并生成计划
+              <button disabled={!selectedId || busy} className="ghost-button" onClick={() => void submitChat("plan")}>
+                旧版规则计划
               </button>
-              <button disabled={!selectedId || busy} onClick={() => void submitChat("execute")}>
-                发送并执行安全步骤
+              <button disabled={!selectedId || busy} className="ghost-button" onClick={() => void submitChat("execute")}>
+                旧版安全执行
               </button>
-              <button disabled={busy} onClick={() => void submitRuntime()}>
-                发送到本地运行时
+              <button disabled={busy} className="ghost-button" onClick={() => void submitRuntime()}>
+                直接 runtime
               </button>
             </div>
 
@@ -1723,6 +2371,7 @@ export default function App() {
               </>
             ) : null}
           </section>
+          ) : null}
         </aside>
       </div>
 

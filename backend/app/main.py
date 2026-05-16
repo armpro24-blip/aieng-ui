@@ -21,6 +21,8 @@ import yaml
 
 from .providers import get_provider
 from . import runtime as _rt
+from . import agent_workbench
+from . import agent_engine
 
 APP_ROOT = Path(__file__).resolve().parents[1]
 PLATFORM_ROOT = APP_ROOT.parent
@@ -538,6 +540,54 @@ def _generate_cae_result_summary(settings: Settings, package_path: Path) -> dict
         from aieng.cae_result_summary import generate_cae_result_summary
 
         return generate_cae_result_summary(package_path)
+    except Exception:
+        return None
+    finally:
+        if injected:
+            try:
+                sys.path.remove(candidate)
+            except ValueError:
+                pass
+
+
+def _generate_cae_preprocessing_summary(settings: Settings, package_path: Path) -> dict[str, Any] | None:
+    """Import aieng cae_preprocessing_summary and generate a read-only summary."""
+    aieng_src = settings.aieng_root / "src"
+    if not aieng_src.exists():
+        return None
+    injected = False
+    try:
+        candidate = str(aieng_src)
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            injected = True
+        from aieng.cae_preprocessing_summary import generate_preprocessing_summary
+
+        return generate_preprocessing_summary(package_path)
+    except Exception:
+        return None
+    finally:
+        if injected:
+            try:
+                sys.path.remove(candidate)
+            except ValueError:
+                pass
+
+
+def _generate_cae_simulation_run_summary(settings: Settings, package_path: Path) -> dict[str, Any] | None:
+    """Import aieng cae_simulation_run_summary and generate a read-only summary."""
+    aieng_src = settings.aieng_root / "src"
+    if not aieng_src.exists():
+        return None
+    injected = False
+    try:
+        candidate = str(aieng_src)
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            injected = True
+        from aieng.cae_simulation_run_summary import generate_simulation_run_summary
+
+        return generate_simulation_run_summary(package_path)
     except Exception:
         return None
     finally:
@@ -1386,6 +1436,102 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     def test_runtime_config(payload: dict[str, Any] = Body(default=None)) -> dict[str, Any]:
         return runtime_config_snapshot(active_settings, payload or {})
 
+    @app.get("/api/capabilities")
+    def list_capabilities() -> list[dict[str, Any]]:
+        return agent_workbench.list_capabilities(active_settings)
+
+    @app.post("/api/capabilities/preview")
+    def preview_capability(payload: dict[str, Any] = Body(default=None)) -> dict[str, Any]:
+        return agent_workbench.preview_capability(active_settings, payload or {})
+
+    @app.get("/api/runtime/workflows")
+    def list_runtime_workflows() -> list[dict[str, Any]]:
+        return agent_workbench.list_workflows()
+
+    def _build_agent_response(data: dict[str, Any]) -> dict[str, Any]:
+        message = str(data.get("message") or "").strip()
+        if not message:
+            raise HTTPException(status_code=400, detail="message is required")
+        project_id = data.get("project_id") or None
+        project_summary: dict[str, Any] | None = None
+        if project_id:
+            project_summary = package_summary(active_settings, str(project_id))
+        patch_json = data.get("patch_json") if isinstance(data.get("patch_json"), dict) else None
+        return agent_engine.build_agent_plan(
+            settings=active_settings,
+            message=message,
+            project_id=str(project_id) if project_id else None,
+            project_summary=project_summary,
+            runtime_tools=_rt.registered_tools_info(),
+            capabilities=agent_workbench.list_capabilities(active_settings),
+            llm_config=agent_engine.sanitize_llm_config(data.get("llm_config")),
+            patch_json=patch_json,
+            dry_run=bool(data.get("dry_run", False)),
+        )
+
+    @app.post("/api/agent/plan")
+    def create_agent_plan(payload: dict[str, Any] = Body(default=None)) -> dict[str, Any]:
+        return _build_agent_response(payload or {})
+
+    @app.post("/api/agent/runs")
+    def create_agent_run(payload: dict[str, Any] = Body(default=None)) -> dict[str, Any]:
+        data = payload or {}
+        agent_plan = data.get("plan") if isinstance(data.get("plan"), dict) else _build_agent_response(data)
+        steps = agent_plan.get("steps") if isinstance(agent_plan.get("steps"), list) else []
+        message = str(agent_plan.get("message") or data.get("message") or "agent run").strip()
+        project_id = agent_plan.get("project_id") or data.get("project_id") or None
+        run = _rt.RunRecord(
+            run_id=uuid.uuid4().hex[:12],
+            message=message,
+            created_at=now_iso(),
+            status="pending",
+            project_id=str(project_id) if project_id else None,
+        )
+        ctx: dict[str, Any] = {
+            "project_id": run.project_id,
+            "workflow_id": "agent_chat",
+            "agent_plan": {
+                "mode": agent_plan.get("mode"),
+                "warnings": agent_plan.get("warnings") or [],
+                "errors": agent_plan.get("errors") or [],
+            },
+        }
+        if isinstance(data.get("llm_config"), dict):
+            ctx["llm_config"] = agent_engine.sanitize_llm_config(data.get("llm_config"))
+        _rt.execute_run_with_plan(run, steps, ctx)
+        if run.project_id:
+            try:
+                write_audit_log(active_settings, run.project_id, "agent_run", {
+                    "kind": "agent_run",
+                    "run_id": run.run_id,
+                    "message": run.message,
+                    "agent_plan": agent_plan,
+                    "status": run.status,
+                    "errors": run.errors,
+                    "created_at": run.created_at,
+                })
+            except Exception:
+                pass
+        return {
+            "agent": agent_plan,
+            "run": _rt.run_to_dict(run),
+        }
+
+    @app.get("/api/benchmarks/scenarios")
+    def list_benchmark_scenarios() -> list[dict[str, Any]]:
+        return agent_workbench.list_benchmark_scenarios(active_settings)
+
+    @app.post("/api/benchmarks/runs")
+    def create_benchmark_run(payload: dict[str, Any] = Body(default=None)) -> dict[str, Any]:
+        return agent_workbench.run_benchmark_from_payload(active_settings, payload or {})
+
+    @app.get("/api/benchmarks/runs/{run_id}")
+    def get_benchmark_run(run_id: str) -> dict[str, Any]:
+        run = agent_workbench.get_benchmark_run(active_settings, run_id)
+        if run is None:
+            raise HTTPException(status_code=404, detail="benchmark run not found")
+        return run
+
     @app.get("/api/projects")
     def list_projects() -> list[dict[str, Any]]:
         items = [normalize_project(read_json(path, {})) for path in active_settings.projects_root.glob("*/metadata.json")]
@@ -1460,6 +1606,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         result = _generate_cae_result_summary(active_settings, package_path)
         if result is None:
             raise HTTPException(status_code=503, detail="aieng summarizer unavailable")
+        return result
+
+    @app.get("/api/projects/{project_id}/cae-preprocessing-summary")
+    def get_project_cae_preprocessing_summary(project_id: str) -> dict[str, Any]:
+        project = get_project(active_settings, project_id)
+        package_path = resolve_project_path(active_settings, project_id, project.get("aieng_file"))
+        if package_path is None or not package_path.exists():
+            raise HTTPException(status_code=404, detail=".aieng package not found")
+        result = _generate_cae_preprocessing_summary(active_settings, package_path)
+        if result is None:
+            raise HTTPException(status_code=503, detail="aieng preprocessing summarizer unavailable")
+        return result
+
+    @app.get("/api/projects/{project_id}/cae-simulation-run-summary")
+    def get_project_cae_simulation_run_summary(project_id: str) -> dict[str, Any]:
+        project = get_project(active_settings, project_id)
+        package_path = resolve_project_path(active_settings, project_id, project.get("aieng_file"))
+        if package_path is None or not package_path.exists():
+            raise HTTPException(status_code=404, detail=".aieng package not found")
+        result = _generate_cae_simulation_run_summary(active_settings, package_path)
+        if result is None:
+            raise HTTPException(status_code=503, detail="aieng simulation run summarizer unavailable")
         return result
 
     @app.post("/api/projects/{project_id}/import-aieng")
@@ -1784,6 +1952,27 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         )
         return result
 
+    def _tool_mcp_check(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        pid = inp.get("project_id")
+        if not pid:
+            raise ValueError("project_id is required for mcp.check")
+        return mcp_check(active_settings, pid, inp)
+
+    def _tool_mcp_parse_patch(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        patch_json = inp.get("patch_json")
+        if not isinstance(patch_json, dict):
+            raise ValueError("patch_json is required for mcp.parse_patch")
+        return parse_patch(active_settings, {"patch_json": patch_json})
+
+    def _tool_mcp_prepare_execution(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        pid = inp.get("project_id")
+        if not pid:
+            raise ValueError("project_id is required for mcp.prepare_execution")
+        patch_json = inp.get("patch_json")
+        if not isinstance(patch_json, dict):
+            raise ValueError("patch_json is required for mcp.prepare_execution")
+        return prepare_patch_execution(active_settings, pid, inp)
+
     def _tool_freecad_run_macro(_inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
         # The execute_run() approval gate should prevent this from being called.
         # This body is a defensive belt-and-suspenders guard.
@@ -1832,6 +2021,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description="Regenerate CAE result summary, evidence index, and markdown inside the .aieng package",
     )
     _rt.register_tool(
+        "mcp.check",
+        _tool_mcp_check,
+        description="Check MCP guardrails, capability gaps, and operation policy for this project",
+    )
+    _rt.register_tool(
+        "mcp.parse_patch",
+        _tool_mcp_parse_patch,
+        description="Parse an .aieng patch proposal without executing it",
+    )
+    _rt.register_tool(
+        "mcp.prepare_execution",
+        _tool_mcp_prepare_execution,
+        description="Dry-run an .aieng patch proposal and return preflight side effects",
+    )
+    _rt.register_tool(
         "freecad.run_macro",
         _tool_freecad_run_macro,
         requires_approval=True,
@@ -1873,7 +2077,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ctx: dict[str, Any] = {"project_id": run.project_id}
         if "tool_input" in data and isinstance(data["tool_input"], dict):
             ctx["tool_input"] = data["tool_input"]
-        _rt.execute_run(run, ctx)
+        if data.get("workflow_id"):
+            ctx["workflow_id"] = data.get("workflow_id")
+        if "llm_config" in data and isinstance(data["llm_config"], dict):
+            # Keep raw API keys out of run records.
+            ctx["llm_config"] = {k: v for k, v in data["llm_config"].items() if k != "api_key"}
+        if isinstance(data.get("steps"), list):
+            _rt.execute_run_with_plan(run, data["steps"], ctx)
+        elif data.get("workflow_id"):
+            workflows = {wf["id"]: wf for wf in agent_workbench.list_workflows()}
+            workflow = workflows.get(str(data["workflow_id"]))
+            if workflow is None:
+                run.status = "failed"
+                run.errors.append(f"workflow not found: {data['workflow_id']}")
+                _rt.store_run(run)
+            else:
+                _rt.execute_run_with_plan(run, workflow.get("steps") or [], ctx)
+        else:
+            _rt.execute_run(run, ctx)
         all_artifacts = [
             a for tr in run.tool_results for a in tr.artifacts
         ]

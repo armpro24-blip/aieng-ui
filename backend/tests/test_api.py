@@ -779,6 +779,53 @@ def test_runtime_tools_endpoint_returns_registry(tmp_path: Path) -> None:
         assert "description" in tool
 
 
+def test_agent_plan_dry_run_without_api_key_returns_guarded_plan(tmp_path: Path) -> None:
+    settings = _make_runtime_settings(tmp_path)
+    project = save_project(settings, default_project("agent-test"))
+    client = TestClient(create_app(settings))
+
+    response = client.post(
+        "/api/agent/plan",
+        json={
+            "message": "帮我检查这个模型并准备减重建模",
+            "project_id": project["id"],
+            "dry_run": True,
+            "llm_config": {
+                "provider": "openai-compatible",
+                "model": "fake",
+                "api_key": "must-not-persist",
+            },
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["mode"] == "heuristic"
+    assert data["project_id"] == project["id"]
+    tools = data["preview"]["tools"]
+    assert "aieng.inspect_package" in tools
+    assert "mcp.check" in tools
+    assert "api_key" not in data["llm_config"]
+    assert data["warnings"], "modeling requests without patch_json should explain the missing executable patch"
+
+
+def test_agent_run_without_project_completes_with_empty_safe_plan(tmp_path: Path) -> None:
+    settings = _make_runtime_settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    response = client.post(
+        "/api/agent/runs",
+        json={"message": "解释一下如何开始建模", "dry_run": True},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["agent"]["mode"] == "heuristic"
+    assert data["agent"]["steps"] == []
+    assert data["run"]["status"] == "completed"
+    assert data["run"]["project_id"] is None
+
+
 # ── Phase 2: freecad.inspect_geometry tests ───────────────────────────────────
 
 def test_freecad_inspect_geometry_success_via_mocked_bridge(monkeypatch, tmp_path: Path) -> None:
@@ -1255,8 +1302,8 @@ def test_postprocessing_smoke_metrics_import_and_summary_refresh(tmp_path: Path)
         platform_root=tmp_path / "platform",
         workspace_root=workspace,
         data_root=tmp_path / "data",
-        aieng_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng"),
-        freecad_mcp_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng_freecad_mcp"),
+        aieng_root=Path(__file__).resolve().parents[3] / "aieng",
+        freecad_mcp_root=Path(__file__).resolve().parents[3] / "aieng-freecad-mcp",
         freecad_home=workspace / "freecad",
         sample_step=workspace / "sample.step",
     )
@@ -1427,3 +1474,242 @@ def test_write_artifact_to_package_missing_manifest_raises(tmp_path: Path) -> No
 
     with pytest.raises(ValueError, match="missing manifest"):
         write_artifact_to_package(pkg, "results/x.json", source)
+
+
+def test_capabilities_endpoint_exposes_runtime_and_mcp_registry(tmp_path: Path) -> None:
+    settings = _make_runtime_settings(tmp_path)
+    mcp_src = settings.freecad_mcp_root / "src" / "freecad_mcp"
+    mcp_src.mkdir(parents=True)
+    (mcp_src / "__init__.py").write_text("", encoding="utf-8")
+    (mcp_src / "tool_registry.py").write_text(
+        """
+from dataclasses import dataclass
+
+@dataclass
+class Entry:
+    def model_dump(self, mode='json'):
+        return {
+            'tool_name': 'cad_test_mutation',
+            'category': 'cad',
+            'purpose': 'Test mutation tool.',
+            'required_inputs': ['object_name'],
+            'optional_inputs': ['package_path'],
+            'side_effects': ['Writes /tmp/out.step'],
+            'mutates_cad': True,
+            'mutates_package': False,
+            'may_update_claim_map': False,
+            'runtime_requirements': ['freecad'],
+            'dry_run_support': 'partial',
+            'claim_policy': {'claims_advanced_default': False},
+        }
+
+class Registry:
+    def list_all(self):
+        return [Entry()]
+
+def default_registry():
+    return Registry()
+""",
+        encoding="utf-8",
+    )
+
+    client = TestClient(create_app(settings))
+    response = client.get("/api/capabilities")
+
+    assert response.status_code == 200
+    capabilities = response.json()
+    names = {item["name"] for item in capabilities}
+    assert "aieng.inspect_package" in names
+    assert "cad_test_mutation" in names
+    assert "benchmark.ai_usefulness.run" in names
+
+
+def test_capability_preview_requires_approval_for_mutating_tool(tmp_path: Path) -> None:
+    settings = _make_runtime_settings(tmp_path)
+    mcp_src = settings.freecad_mcp_root / "src" / "freecad_mcp"
+    mcp_src.mkdir(parents=True)
+    (mcp_src / "__init__.py").write_text("", encoding="utf-8")
+    (mcp_src / "tool_registry.py").write_text(
+        """
+from dataclasses import dataclass
+
+@dataclass
+class Entry:
+    def model_dump(self, mode='json'):
+        return {
+            'tool_name': 'cad_set_parameter',
+            'category': 'cad',
+            'purpose': 'Set parameter.',
+            'required_inputs': ['object_name', 'parameter_name', 'value'],
+            'optional_inputs': ['file_path'],
+            'side_effects': ['Writes modified artifact'],
+            'mutates_cad': True,
+            'mutates_package': True,
+            'may_update_claim_map': False,
+            'runtime_requirements': ['freecad'],
+            'dry_run_support': 'partial',
+            'claim_policy': {'claims_advanced_default': False},
+        }
+
+class Registry:
+    def list_all(self):
+        return [Entry()]
+
+def default_registry():
+    return Registry()
+""",
+        encoding="utf-8",
+    )
+
+    client = TestClient(create_app(settings))
+    response = client.post(
+        "/api/capabilities/preview",
+        json={"operation_name": "cad_set_parameter", "inputs": {"file_path": "out.step"}},
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "approval_required"
+    assert data["approval_required"] is True
+    assert data["preview"]["would_write_artifacts"] == ["out.step"]
+    assert "feature_graph_existence" in data["preview"]["guard_checks_required"]
+
+
+def test_cae_preprocessing_and_simulation_summary_endpoints(monkeypatch, tmp_path: Path) -> None:
+    settings = _make_runtime_settings(tmp_path)
+    project = save_project(settings, default_project("cae-summaries"))
+    pkg = project_dir(settings, project["id"]) / "packages" / "test.aieng"
+    pkg.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(pkg, "w") as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "test"}))
+    project["aieng_file"] = "packages/test.aieng"
+    save_project(settings, project)
+
+    monkeypatch.setattr(
+        "app.main._generate_cae_preprocessing_summary",
+        lambda _settings, _pkg: {"summary_type": "cae_preprocessing", "status": {"ready_for_solver": False}},
+    )
+    monkeypatch.setattr(
+        "app.main._generate_cae_simulation_run_summary",
+        lambda _settings, _pkg: {"summary_type": "cae_simulation_run", "status": {"run_count": 0}},
+    )
+
+    client = TestClient(create_app(settings))
+    prep = client.get(f"/api/projects/{project['id']}/cae-preprocessing-summary")
+    sim = client.get(f"/api/projects/{project['id']}/cae-simulation-run-summary")
+
+    assert prep.status_code == 200
+    assert prep.json()["summary_type"] == "cae_preprocessing"
+    assert sim.status_code == 200
+    assert sim.json()["summary_type"] == "cae_simulation_run"
+
+
+def test_runtime_workflow_endpoint_executes_explicit_steps(tmp_path: Path) -> None:
+    settings = _make_runtime_settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    response = client.post(
+        "/api/runtime/runs",
+        json={
+            "message": "workflow smoke",
+            "workflow_id": "custom",
+            "steps": [
+                {"id": "llm-plan", "kind": "llm", "description": "Plan with LLM", "status": "pending"},
+                {"id": "artifact-note", "kind": "artifact", "description": "Record artifact", "status": "pending"},
+            ],
+            "llm_config": {"provider": "openai-compatible", "model": "demo", "api_key": "must_not_persist"},
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert [step["kind"] for step in data["plan"]] == ["llm", "artifact"]
+    assert "must_not_persist" not in json.dumps(data)
+
+
+def test_benchmark_dry_run_endpoint_uses_provider_without_api_key(tmp_path: Path, monkeypatch) -> None:
+    settings = _make_runtime_settings(tmp_path)
+    # Build a tiny fake aieng.benchmarking module so this test is isolated from
+    # optional benchmark dependencies and never calls an external LLM.
+    bench_pkg = settings.aieng_root / "src" / "aieng" / "benchmarking"
+    bench_pkg.mkdir(parents=True)
+    (settings.aieng_root / "src" / "aieng" / "__init__.py").write_text("", encoding="utf-8")
+    (bench_pkg / "__init__.py").write_text(
+        """
+from dataclasses import dataclass
+
+@dataclass(frozen=True)
+class BenchmarkPaths:
+    benchmark_scenario: str
+    question_file: object
+    rubric_file: object
+    condition_a_path: object
+    condition_b_index_file: object
+    condition_b_source: object
+    results_dir: object
+    schema_file: object
+
+@dataclass(frozen=True)
+class ProviderConfig:
+    provider: str
+    model: str
+    api_key: str | None = None
+    base_url: str | None = None
+    api_key_env: str | None = None
+    input_price_per_million_tokens: float | None = None
+    output_price_per_million_tokens: float | None = None
+    max_output_tokens: int = 8192
+    temperature: float = 0.0
+    top_p: float = 1.0
+    seed: int | None = None
+
+@dataclass(frozen=True)
+class BenchmarkRunConfig:
+    condition: str
+    provider: ProviderConfig
+    dry_run: bool = False
+    output_path: object | None = None
+
+def run_benchmark(paths, config, provider, prepare_condition_b=None, progress=None):
+    if progress:
+        progress('fake dry run')
+    return {
+        'run_id': 'run_fake',
+        'mode': 'dry_run' if config.dry_run else 'run',
+        'benchmark_scenario': paths.benchmark_scenario,
+        'provider': config.provider.provider,
+        'model': config.provider.model,
+        'cost_estimate': {'estimated_calls': 2},
+        'warnings': [],
+        'dry_run_notes': ['fake note'],
+    }
+""",
+        encoding="utf-8",
+    )
+    scenario = settings.aieng_root / "benchmarks" / "ai_usefulness" / "scenarios" / "sample"
+    scenario.mkdir(parents=True)
+    for name in ("questions.md", "condition_a.md", "condition_b_index.md"):
+        (scenario / name).write_text("1. Question?\n", encoding="utf-8")
+    (settings.aieng_root / "benchmarks" / "ai_usefulness" / "scoring_rubric.md").parent.mkdir(parents=True, exist_ok=True)
+    (settings.aieng_root / "benchmarks" / "ai_usefulness" / "scoring_rubric.md").write_text("rubric", encoding="utf-8")
+    (settings.aieng_root / "benchmarks" / "ai_usefulness" / "results.schema.json").write_text("{}", encoding="utf-8")
+    monkeypatch.delitem(__import__("sys").modules, "aieng", raising=False)
+    monkeypatch.delitem(__import__("sys").modules, "aieng.benchmarking", raising=False)
+
+    client = TestClient(create_app(settings))
+    response = client.post(
+        "/api/benchmarks/runs",
+        json={
+            "scenario_id": "sample",
+            "dry_run": True,
+            "llm_config": {"provider": "openai-compatible", "model": "fake-model", "api_key": "secret"},
+        },
+    )
+
+    assert response.status_code == 200
+    data = response.json()
+    assert data["status"] == "completed"
+    assert data["dry_run"] is True
+    assert data["result"]["mode"] == "dry_run"
+    assert "secret" not in json.dumps(data)
