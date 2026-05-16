@@ -1,4 +1,3 @@
-import type { AgentPlan, AgentRunResponse, BenchmarkRun, BenchmarkScenario, CaeArtifactDetection, CapabilityDescriptor, CapabilityPreview, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeEvent, RuntimeRun, RuntimeRunSummary, RuntimeToolInfo, SolverFieldDescriptor, WorkflowDefinition, WorkflowStep } from "./types";
 import type { AgentPlan, AgentRunResponse, BenchmarkRun, BenchmarkScenario, CaeArtifactDetection, CaePreprocessingSummary, CaeSimulationRunSummary, CapabilityDescriptor, CapabilityPreview, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeEvent, RuntimeRun, RuntimeRunSummary, RuntimeToolInfo, SolverFieldDescriptor, WorkflowDefinition, WorkflowStep } from "./types";
 
 const API = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
