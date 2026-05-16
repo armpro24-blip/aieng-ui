@@ -965,6 +965,85 @@ def test_freecad_run_macro_approval_unchanged_by_phase2(tmp_path: Path) -> None:
     assert approval_ev["payload"]["tool"] == "freecad.run_macro"
 
 
+def _execute_run_macro(client, tool_input):
+    """Start a macro run via the runtime endpoint and auto-approve if gated."""
+    resp = client.post("/api/runtime/runs", json={
+        "message": "run macro",
+        "tool_input": tool_input,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    if data["status"] == "awaiting_approval":
+        run_id = data["run_id"]
+        approve_resp = client.post(f"/api/runtime/runs/{run_id}/approve")
+        assert approve_resp.status_code == 200
+        data = approve_resp.json()
+    return data
+
+
+def test_freecad_run_macro_success_via_mocked_bridge(monkeypatch, tmp_path: Path) -> None:
+    """freecad.run_macro returns bridge output when macro execution succeeds."""
+    settings = _make_runtime_settings(tmp_path)
+
+    fake_result = {
+        "status": "ok",
+        "macro_path": "/fake/macro.py",
+        "document_path": "",
+        "freecad_version": "0.21.0",
+        "stdout": "Macro executed successfully",
+        "stderr": "",
+        "return_code": 0,
+        "warnings": [],
+    }
+
+    monkeypatch.setattr("app.freecad_bridge.run_macro", lambda *a, **kw: fake_result)
+
+    macro_file = tmp_path / "macro.py"
+    macro_file.write_text("print('hello')", encoding="utf-8")
+
+    client = TestClient(create_app(settings))
+    data = _execute_run_macro(client, {"macro_path": str(macro_file)})
+
+    assert data["status"] == "completed"
+    out = data["tool_results"][0]["output"]
+    assert out["status"] == "ok"
+    assert out["stdout"] == "Macro executed successfully"
+    assert out["return_code"] == 0
+
+
+def test_freecad_run_macro_missing_input_returns_error(tmp_path: Path) -> None:
+    """When no macro file is provided, the tool returns a structured error."""
+    settings = _make_runtime_settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    data = _execute_run_macro(client, {})
+
+    assert data["status"] == "completed"
+    out = data["tool_results"][0]["output"]
+    assert out["status"] == "error"
+    assert out["code"] == "missing_macro"
+
+
+def test_freecad_run_macro_bridge_exception_produces_tool_failed(monkeypatch, tmp_path: Path) -> None:
+    """When the bridge raises, the run records tool_failed and run_failed."""
+    settings = _make_runtime_settings(tmp_path)
+
+    def _fail(*a, **kw):
+        raise RuntimeError("FreeCADCmd not found")
+
+    monkeypatch.setattr("app.freecad_bridge.run_macro", _fail)
+
+    macro_file = tmp_path / "macro.py"
+    macro_file.write_text("print('hello')", encoding="utf-8")
+
+    client = TestClient(create_app(settings))
+    data = _execute_run_macro(client, {"macro_path": str(macro_file)})
+
+    assert data["status"] == "failed"
+    event_types = [e["type"] for e in data["events"]]
+    assert "tool_failed" in event_types
+
+
 # ── Phase 2.5: freecad.export_step tests ──────────────────────────────────────
 
 def test_freecad_export_step_success_via_mocked_bridge(monkeypatch, tmp_path: Path) -> None:

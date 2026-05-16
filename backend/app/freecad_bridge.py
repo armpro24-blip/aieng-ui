@@ -94,6 +94,56 @@ def export_step(
     return run_step_export(input_path, output_path, freecad_cmd, timeout=timeout)
 
 
+def run_macro(
+    macro_path: str | Path,
+    *,
+    freecad_cmd: str | Path,
+    freecad_mcp_root: str | Path,
+    document_path: str | Path | None = None,
+    save_document: bool = False,
+    timeout: int = 300,
+) -> dict[str, Any]:
+    """Execute a FreeCAD macro via FreeCADCmd subprocess.
+
+    Imports ``freecad_mcp.macro_runner.run_macro`` from
+    ``freecad_mcp_root/src``. Raises RuntimeError if the package cannot be
+    found, FileNotFoundError if ``macro_path`` or ``freecad_cmd`` do not
+    exist, or RuntimeError if FreeCADCmd does not produce output.
+
+    Args:
+        macro_path: Path to the macro file (.FCMacro or .py).
+        freecad_cmd: Path to the FreeCADCmd executable.
+        freecad_mcp_root: Root of the aieng_freecad_mcp repo checkout.
+        document_path: Optional working document (.FCStd or .step) to open
+            before executing the macro.
+        save_document: If True, save the document after macro execution.
+        timeout: Seconds before FreeCADCmd is considered hung.
+
+    Returns:
+        A dict with ``status``, ``stdout``, ``stderr``, ``return_code``,
+        ``freecad_version``, and optionally ``error`` / ``error_type``.
+    """
+    src_path = str(Path(freecad_mcp_root) / "src")
+    _load_src(freecad_mcp_root)
+
+    try:
+        from freecad_mcp.macro_runner import run_macro as _run_macro  # type: ignore[import]
+    except ImportError as exc:
+        raise RuntimeError(
+            f"Cannot import freecad_mcp.macro_runner from {src_path!r}. "
+            f"Ensure aieng_freecad_mcp is checked out at {freecad_mcp_root!r}. "
+            f"Detail: {exc}"
+        ) from exc
+
+    return _run_macro(
+        macro_path,
+        freecad_cmd,
+        document_path=document_path,
+        save_document=save_document,
+        timeout=timeout,
+    )
+
+
 def export_computed_metrics(
     input_path: str | Path,
     output_path: str | Path,

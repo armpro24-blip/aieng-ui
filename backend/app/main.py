@@ -3252,12 +3252,56 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except Exception:
                 pass
 
-    def _tool_freecad_run_macro(_inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
-        # The execute_run() approval gate should prevent this from being called.
-        # This body is a defensive belt-and-suspenders guard.
-        raise RuntimeError(
-            "freecad.run_macro reached execution without approval — approval gate bypassed"
+    def _tool_freecad_run_macro(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import freecad_bridge
+        from pathlib import Path as _Path
+
+        macro_path: str | None = inp.get("macroPath") or inp.get("macro_path")
+        if not macro_path:
+            return {
+                "status": "error",
+                "code": "missing_macro",
+                "message": "No macro file provided. Pass macroPath.",
+            }
+
+        macro_file = _Path(macro_path)
+        if not macro_file.exists():
+            return {
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Macro file not found: {macro_path}",
+            }
+
+        # Optional working document
+        document_path: str | None = inp.get("documentPath") or inp.get("document_path")
+        save_document: bool = bool(inp.get("saveDocument", inp.get("save_document", False)))
+        timeout: int = int(inp.get("timeout", 300))
+
+        result = freecad_bridge.run_macro(
+            macro_file,
+            freecad_cmd=active_settings.freecad_cmd,
+            freecad_mcp_root=active_settings.freecad_mcp_root,
+            document_path=document_path,
+            save_document=save_document,
+            timeout=timeout,
         )
+
+        # Audit log
+        pid = inp.get("project_id")
+        if pid and isinstance(result, dict):
+            try:
+                write_audit_log(active_settings, pid, "freecad_macro", {
+                    "tool": "freecad.run_macro",
+                    "macroPath": macro_path,
+                    "documentPath": document_path,
+                    "status": result.get("status"),
+                    "returnCode": result.get("return_code"),
+                    "freecadVersion": result.get("freecad_version"),
+                })
+            except Exception:
+                pass
+
+        return result
 
     _rt.register_tool(
         "aieng.inspect_package",
