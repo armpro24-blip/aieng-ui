@@ -2604,3 +2604,427 @@ def test_prepare_solver_run_no_solver_subprocess(tmp_path: Path) -> None:
 
     assert resp.status_code == 200
     mock_run.assert_not_called()
+
+
+def _execute_run_solver(client, project_id, tool_input):
+    """Start a solver run via the runtime endpoint and auto-approve if gated."""
+    resp = client.post("/api/runtime/runs", json={
+        "message": "execute solver run",
+        "project_id": project_id,
+        "tool_input": tool_input,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    if data["status"] == "awaiting_approval":
+        run_id = data["run_id"]
+        approve_resp = client.post(f"/api/runtime/runs/{run_id}/approve")
+        assert approve_resp.status_code == 200
+        data = approve_resp.json()
+    return data
+
+
+def test_run_solver_rejects_path_traversal(tmp_path: Path) -> None:
+    """cae.run_solver rejects input_deck_path containing '..'."""
+    from unittest.mock import patch
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("solver-traversal"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "solver.aieng"
+    _make_preflight_package(pkg_path, input_deck=True)
+    project["aieng_file"] = "solver.aieng"
+    save_project(settings, project)
+
+    with patch("app.main.shutil.which", return_value="/fake/ccx"):
+        data = _execute_run_solver(client, project_id, {
+            "project_id": project_id,
+            "input_deck_path": "simulation/../secret.inp",
+        })
+
+    assert data["status"] == "completed"
+    result = data["tool_results"][0]["output"]
+    assert result["ok"] is False
+    assert result["code"] == "forbidden_path"
+    assert result["solver_execution_performed"] is False
+
+
+def test_run_solver_rejects_non_inp(tmp_path: Path) -> None:
+    """cae.run_solver rejects input_deck_path that does not end with .inp."""
+    from unittest.mock import patch
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("solver-noninp"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "solver.aieng"
+    _make_preflight_package(pkg_path, input_deck=True)
+    project["aieng_file"] = "solver.aieng"
+    save_project(settings, project)
+
+    with patch("app.main.shutil.which", return_value="/fake/ccx"):
+        data = _execute_run_solver(client, project_id, {
+            "project_id": project_id,
+            "input_deck_path": "simulation/runs/run_001/solver_input.txt",
+        })
+
+    assert data["status"] == "completed"
+    result = data["tool_results"][0]["output"]
+    assert result["ok"] is False
+    assert result["code"] == "invalid_input_deck"
+    assert result["solver_execution_performed"] is False
+
+
+def test_run_solver_ccx_unavailable_returns_error(tmp_path: Path) -> None:
+    """cae.run_solver returns a clear error when ccx is not on PATH."""
+    from unittest.mock import patch
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("solver-noccx"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "solver.aieng"
+    _make_preflight_package(pkg_path, input_deck=True)
+    project["aieng_file"] = "solver.aieng"
+    save_project(settings, project)
+
+    with patch("app.main.shutil.which", return_value=None):
+        data = _execute_run_solver(client, project_id, {
+            "project_id": project_id,
+            "input_deck_path": "simulation/runs/run_001/solver_input.inp",
+        })
+
+    assert data["status"] == "completed"
+    result = data["tool_results"][0]["output"]
+    assert result["ok"] is False
+    assert result["code"] == "solver_not_found"
+    assert result["solver_execution_performed"] is False
+    assert "ccx" in result["message"].lower()
+
+
+def test_run_solver_mocked_subprocess_success(tmp_path: Path) -> None:
+    """cae.run_solver invokes ccx with shell=False and writes solver_run.json + solver_log.txt."""
+    from unittest.mock import patch, MagicMock
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("solver-success"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "solver.aieng"
+    _make_preflight_package(pkg_path, input_deck=True)
+    project["aieng_file"] = "solver.aieng"
+    save_project(settings, project)
+
+    def fake_run(cmd, **kwargs):
+        cwd = Path(kwargs.get("cwd", "."))
+        frd_path = cwd / "solver_input.frd"
+        frd_path.write_text(_make_test_frd({1: [1.0, 0.0, 0.0, 1.0]}, None), encoding="utf-8")
+        return MagicMock(returncode=0, stdout="solver completed\n", stderr="")
+
+    with patch("app.main.shutil.which", return_value="/fake/ccx"), \
+         patch("subprocess.run", side_effect=fake_run) as mock_run:
+        data = _execute_run_solver(client, project_id, {
+            "project_id": project_id,
+            "input_deck_path": "simulation/runs/run_001/solver_input.inp",
+            "extract_results": False,
+            "refresh_summary": False,
+        })
+
+    assert data["status"] == "completed"
+    result = data["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert result["solver_execution_performed"] is True
+    assert result["return_code"] == 0
+    assert result["status"] == "completed"
+
+    # Verify subprocess args
+    assert len(mock_run.call_args_list) == 1
+    args, kwargs = mock_run.call_args_list[0]
+    assert args[0] == ["/fake/ccx", "solver_input"]
+    assert kwargs.get("shell") is False
+
+    # Verify package artifacts
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        names = zf.namelist()
+        assert "simulation/runs/run_001/solver_input.inp" in names
+        assert "simulation/runs/run_001/solver_log.txt" in names
+        assert "simulation/runs/run_001/solver_run.json" in names
+        assert "simulation/runs/run_001/outputs/result.frd" in names
+
+    # Verify solver_run.json content
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        run_meta = json.loads(zf.read("simulation/runs/run_001/solver_run.json"))
+    assert run_meta["run_id"] == "run_001"
+    assert run_meta["solver"] == "CalculiX"
+    assert run_meta["state"] == "completed"
+    assert run_meta["solved"] is True
+    assert run_meta["converged"] is None
+    assert run_meta["return_code"] == 0
+    assert "started_at" in run_meta
+    assert "finished_at" in run_meta
+    assert "duration_seconds" in run_meta
+    assert run_meta["input_files"] == ["simulation/runs/run_001/solver_input.inp"]
+    assert "simulation/runs/run_001/outputs/result.frd" in run_meta["output_files"]
+
+
+def test_run_solver_writes_frd_to_outputs(tmp_path: Path) -> None:
+    """cae.run_solver writes result.frd into simulation/runs/<run_id>/outputs/."""
+    from unittest.mock import patch, MagicMock
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("solver-frd"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "solver.aieng"
+    _make_preflight_package(pkg_path, input_deck=True)
+    project["aieng_file"] = "solver.aieng"
+    save_project(settings, project)
+
+    def fake_run(cmd, **kwargs):
+        cwd = Path(kwargs.get("cwd", "."))
+        frd_path = cwd / "solver_input.frd"
+        frd_path.write_text(_make_test_frd({1: [1.0, 0.0, 0.0, 1.0]}, None), encoding="utf-8")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("app.main.shutil.which", return_value="/fake/ccx"), \
+         patch("subprocess.run", side_effect=fake_run):
+        data = _execute_run_solver(client, project_id, {
+            "project_id": project_id,
+            "input_deck_path": "simulation/runs/run_001/solver_input.inp",
+            "extract_results": False,
+            "refresh_summary": False,
+        })
+
+    result = data["tool_results"][0]["output"]
+    assert result["ok"] is True
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        assert "simulation/runs/run_001/outputs/result.frd" in zf.namelist()
+
+
+def test_run_solver_extracts_results_when_requested(tmp_path: Path) -> None:
+    """cae.run_solver calls existing FRD extraction when extract_results=true."""
+    from unittest.mock import patch, MagicMock
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("solver-extract"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "solver.aieng"
+    _make_preflight_package(pkg_path, input_deck=True)
+    project["aieng_file"] = "solver.aieng"
+    save_project(settings, project)
+
+    extract_called: dict[str, Any] = {}
+
+    def fake_run(cmd, **kwargs):
+        cwd = Path(kwargs.get("cwd", "."))
+        frd_path = cwd / "solver_input.frd"
+        frd_path.write_text(_make_test_frd({1: [1.0, 0.0, 0.0, 1.0]}, None), encoding="utf-8")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    def fake_extract(package_path, frd_path, *, aieng_root, load_case_id, software, overwrite):
+        extract_called["package_path"] = package_path
+        extract_called["frd_path"] = frd_path
+        extract_called["load_case_id"] = load_case_id
+        extract_called["software"] = software
+        return {
+            "status": "ok",
+            "metrics": {"load_cases": [{"id": load_case_id, "metrics": {}}]},
+            "artifacts": [{"path": "results/computed_metrics.json", "kind": "computed_metrics", "role": "extracted_metrics"}],
+        }
+
+    with patch("app.main.shutil.which", return_value="/fake/ccx"), \
+         patch("subprocess.run", side_effect=fake_run), \
+         patch("app.aieng_bridge.extract_frd_solver_results", fake_extract):
+        data = _execute_run_solver(client, project_id, {
+            "project_id": project_id,
+            "input_deck_path": "simulation/runs/run_001/solver_input.inp",
+            "extract_results": True,
+            "refresh_summary": False,
+        })
+
+    result = data["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert extract_called.get("load_case_id") == "load_case_001"
+    assert extract_called.get("software") == "CalculiX"
+    assert "extracted_metrics" in result
+
+
+def test_run_solver_refreshes_summaries_when_requested(tmp_path: Path) -> None:
+    """cae.run_solver refreshes CAE summaries when refresh_summary=true."""
+    from unittest.mock import patch, MagicMock
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("solver-refresh"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "solver.aieng"
+    _make_preflight_package(pkg_path, input_deck=True)
+    project["aieng_file"] = "solver.aieng"
+    save_project(settings, project)
+
+    refreshed: list[str] = []
+
+    def fake_run(cmd, **kwargs):
+        cwd = Path(kwargs.get("cwd", "."))
+        frd_path = cwd / "solver_input.frd"
+        frd_path.write_text(_make_test_frd({1: [1.0, 0.0, 0.0, 1.0]}, None), encoding="utf-8")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    def fake_refresh_result(pkg, *, aieng_root, overwrite=True):
+        refreshed.append("result_summary")
+
+    def fake_refresh_preproc(pkg, *, aieng_root, overwrite=True):
+        refreshed.append("preprocessing_summary")
+
+    with patch("app.main.shutil.which", return_value="/fake/ccx"), \
+         patch("subprocess.run", side_effect=fake_run), \
+         patch("app.aieng_bridge.refresh_cae_result_summary", fake_refresh_result), \
+         patch("app.aieng_bridge.refresh_preprocessing_summary", fake_refresh_preproc):
+        data = _execute_run_solver(client, project_id, {
+            "project_id": project_id,
+            "input_deck_path": "simulation/runs/run_001/solver_input.inp",
+            "extract_results": False,
+            "refresh_summary": True,
+        })
+
+    result = data["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert "result_summary" in refreshed
+    assert "preprocessing_summary" in refreshed
+    assert result.get("refreshed_summaries") == ["result_summary", "preprocessing_summary"]
+
+
+def test_run_solver_timeout_records_failed_metadata(tmp_path: Path) -> None:
+    """cae.run_solver handles timeout by recording failed run metadata."""
+    from unittest.mock import patch
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+    import subprocess
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("solver-timeout"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "solver.aieng"
+    _make_preflight_package(pkg_path, input_deck=True)
+    project["aieng_file"] = "solver.aieng"
+    save_project(settings, project)
+
+    def fake_run(cmd, **kwargs):
+        raise subprocess.TimeoutExpired(cmd=cmd, timeout=kwargs.get("timeout", 1))
+
+    with patch("app.main.shutil.which", return_value="/fake/ccx"), \
+         patch("subprocess.run", side_effect=fake_run):
+        data = _execute_run_solver(client, project_id, {
+            "project_id": project_id,
+            "input_deck_path": "simulation/runs/run_001/solver_input.inp",
+            "timeout_seconds": 1,
+            "extract_results": False,
+            "refresh_summary": False,
+        })
+
+    assert data["status"] == "completed"
+    result = data["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert result["status"] == "failed"
+    assert result["solver_execution_performed"] is True
+    assert result["return_code"] == -1
+    assert any("timed out" in w.lower() for w in result["errors"])
+
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        run_meta = json.loads(zf.read("simulation/runs/run_001/solver_run.json"))
+    assert run_meta["state"] == "failed"
+    assert run_meta["solved"] is False
+    assert run_meta["return_code"] == -1
+    assert any("timed out" in w.lower() for w in run_meta["errors"])
+
+
+def test_run_solver_registered_in_introspection(tmp_path: Path) -> None:
+    """cae.run_solver appears in /api/runtime/tools with requires_approval=true."""
+    from app.main import create_app
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    resp = client.get("/api/runtime/tools")
+    assert resp.status_code == 200
+    tools = resp.json()
+    names = [t["name"] for t in tools]
+    assert "cae.run_solver" in names
+    solver_tool = next(t for t in tools if t["name"] == "cae.run_solver")
+    assert solver_tool["requires_approval"] is True
+
+
+def test_run_solver_no_mesh_generation(tmp_path: Path) -> None:
+    """cae.run_solver does not attempt mesh generation or input deck generation."""
+    from unittest.mock import patch, MagicMock
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("solver-nomesh"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "solver.aieng"
+    _make_preflight_package(pkg_path, input_deck=True)
+    project["aieng_file"] = "solver.aieng"
+    save_project(settings, project)
+
+    calls: list[list[str]] = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(list(cmd))
+        cwd = Path(kwargs.get("cwd", "."))
+        frd_path = cwd / "solver_input.frd"
+        frd_path.write_text(_make_test_frd({1: [1.0, 0.0, 0.0, 1.0]}, None), encoding="utf-8")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("app.main.shutil.which", return_value="/fake/ccx"), \
+         patch("subprocess.run", side_effect=fake_run):
+        data = _execute_run_solver(client, project_id, {
+            "project_id": project_id,
+            "input_deck_path": "simulation/runs/run_001/solver_input.inp",
+            "extract_results": False,
+            "refresh_summary": False,
+        })
+
+    result = data["tool_results"][0]["output"]
+    assert result["ok"] is True
+    # Only one subprocess invocation: ccx
+    assert len(calls) == 1
+    assert calls[0] == ["/fake/ccx", "solver_input"]

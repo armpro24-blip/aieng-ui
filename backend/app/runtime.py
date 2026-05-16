@@ -354,6 +354,16 @@ _INTENT_MAP: list[tuple[list[str], str, str]] = [
         "cae.prepare_solver_run",
         "Inspect .aieng package and return solver run preflight plan (no solver execution)",
     ),
+    (
+        [
+            "execute solver run", "start solver run", "run calculix",
+            "execute calculix", "start calculix", "run simulation",
+            "execute simulation", "start simulation",
+            "执行求解器运行", "运行仿真",
+        ],
+        "cae.run_solver",
+        "Execute an external CalculiX solver run on an existing input deck (requires approval)",
+    ),
 ]
 
 

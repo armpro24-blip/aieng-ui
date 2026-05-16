@@ -2514,6 +2514,298 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "warnings": warnings,
         }
 
+    def _tool_cae_run_solver(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        import time as _time
+        import subprocess as _subprocess
+        import tempfile as _tempfile
+        import zipfile as _zipfile
+        from pathlib import Path as _Path
+        from . import aieng_bridge
+
+        package_path_str: str | None = inp.get("packagePath") or inp.get("package_path")
+        project_id: str | None = inp.get("project_id")
+        run_id: str = inp.get("runId") or inp.get("run_id") or "run_001"
+        solver: str = inp.get("solver") or "CalculiX"
+        load_case_id: str = inp.get("loadCaseId") or inp.get("load_case_id") or "load_case_001"
+        input_deck_path_str: str | None = inp.get("inputDeckPath") or inp.get("input_deck_path")
+        extract_results: bool = bool(inp.get("extractResults", inp.get("extract_results", True)))
+        refresh_summary: bool = bool(inp.get("refreshSummary", inp.get("refresh_summary", True)))
+        overwrite: bool = bool(inp.get("overwrite", True))
+        timeout_seconds: int = int(inp.get("timeout_seconds", inp.get("timeoutSeconds", 120)))
+
+        # Resolve package path
+        if not package_path_str and project_id:
+            proj = get_project(active_settings, project_id)
+            pkg = resolve_project_path(active_settings, project_id, proj.get("aieng_file"))
+            if pkg is not None and pkg.exists():
+                package_path_str = str(pkg)
+
+        if not package_path_str:
+            return {
+                "ok": False,
+                "tool": "cae.run_solver",
+                "status": "error",
+                "code": "missing_package_path",
+                "message": "No package path provided and no project_id could be resolved.",
+                "solver_execution_performed": False,
+            }
+
+        package_path = _Path(package_path_str)
+        if not package_path.exists():
+            return {
+                "ok": False,
+                "tool": "cae.run_solver",
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Package not found: {package_path_str}",
+                "solver_execution_performed": False,
+            }
+
+        # Validate input_deck_path
+        if not input_deck_path_str:
+            return {
+                "ok": False,
+                "tool": "cae.run_solver",
+                "status": "error",
+                "code": "missing_input_deck",
+                "message": "No input_deck_path provided. Pass the path to the CalculiX .inp file inside the package.",
+                "solver_execution_performed": False,
+            }
+
+        # Reject absolute paths and path traversal
+        normalized = input_deck_path_str.replace("\\", "/")
+        if normalized.startswith("/") or ".." in normalized.split("/"):
+            return {
+                "ok": False,
+                "tool": "cae.run_solver",
+                "status": "error",
+                "code": "forbidden_path",
+                "message": "input_deck_path must be a relative path inside the package and must not contain '..' or start with a separator.",
+                "solver_execution_performed": False,
+            }
+
+        if not input_deck_path_str.lower().endswith(".inp"):
+            return {
+                "ok": False,
+                "tool": "cae.run_solver",
+                "status": "error",
+                "code": "invalid_input_deck",
+                "message": "input_deck_path must end with .inp",
+                "solver_execution_performed": False,
+            }
+
+        # Verify input deck exists in package
+        try:
+            with _zipfile.ZipFile(package_path, "r") as zf:
+                names = set(zf.namelist())
+                if input_deck_path_str not in names:
+                    return {
+                        "ok": False,
+                        "tool": "cae.run_solver",
+                        "status": "error",
+                        "code": "input_deck_not_found",
+                        "message": f"Input deck not found in package: {input_deck_path_str}",
+                        "solver_execution_performed": False,
+                    }
+                inp_data = zf.read(input_deck_path_str)
+        except Exception as exc:
+            return {
+                "ok": False,
+                "tool": "cae.run_solver",
+                "status": "error",
+                "code": "package_read_error",
+                "message": f"Failed to read package: {exc}",
+                "solver_execution_performed": False,
+            }
+
+        # Locate ccx
+        ccx_cmd = None
+        for candidate in ("ccx", "ccx_linux", "ccx2.21", "ccx_static"):
+            ccx_cmd = shutil.which(candidate)
+            if ccx_cmd:
+                break
+
+        if not ccx_cmd:
+            return {
+                "ok": False,
+                "tool": "cae.run_solver",
+                "status": "error",
+                "code": "solver_not_found",
+                "message": "CalculiX executable (ccx) not found on PATH.",
+                "solver_execution_performed": False,
+            }
+
+        # Run solver in a temp directory
+        started_at = datetime.now(timezone.utc).isoformat()
+        start_ts = _time.monotonic()
+        temp_dir = _tempfile.mkdtemp(prefix="aieng_solver_")
+        work_dir = _Path(temp_dir)
+        changed_artifacts: list[dict[str, Any]] = []
+        warnings: list[str] = []
+        errors: list[str] = []
+        frd_path: _Path | None = None
+        return_code: int | None = None
+        stdout = ""
+        stderr = ""
+
+        try:
+            stem = _Path(input_deck_path_str).stem
+            local_inp = work_dir / f"{stem}.inp"
+            local_inp.write_bytes(inp_data)
+
+            try:
+                proc = _subprocess.run(
+                    [ccx_cmd, stem],
+                    cwd=str(work_dir),
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_seconds,
+                    shell=False,
+                )
+                return_code = proc.returncode
+                stdout = proc.stdout or ""
+                stderr = proc.stderr or ""
+            except _subprocess.TimeoutExpired as exc:
+                return_code = -1
+                stdout = exc.stdout.decode() if exc.stdout else ""
+                stderr = exc.stderr.decode() if exc.stderr else ""
+                errors.append(f"Solver timed out after {timeout_seconds} seconds.")
+                warnings.append("Solver execution was terminated due to timeout.")
+            except Exception as exc:
+                return {
+                    "ok": False,
+                    "tool": "cae.run_solver",
+                    "status": "error",
+                    "code": "solver_subprocess_error",
+                    "message": f"Failed to run solver subprocess: {exc}",
+                    "solver_execution_performed": False,
+                }
+
+            finished_at = datetime.now(timezone.utc).isoformat()
+            duration_seconds = round(_time.monotonic() - start_ts, 3)
+
+            # Write solver log
+            log_path = work_dir / "solver_log.txt"
+            log_path.write_text(
+                f"=== STDOUT ===\n{stdout}\n=== STDERR ===\n{stderr}\n=== RETURN CODE ===\n{return_code}\n",
+                encoding="utf-8",
+            )
+
+            solved = return_code == 0
+            # Conservative: don't claim convergence without reliable evidence
+            converged = None
+
+            # Locate generated FRD in temp working directory
+            result_frd = work_dir / f"{stem}.frd"
+            if result_frd.exists():
+                frd_path = result_frd
+
+            # Build solver_run.json
+            solver_run = {
+                "run_id": run_id,
+                "solver": solver,
+                "state": "completed" if solved else "failed",
+                "solved": solved,
+                "converged": converged,
+                "return_code": return_code,
+                "started_at": started_at,
+                "finished_at": finished_at,
+                "duration_seconds": duration_seconds,
+                "input_files": [input_deck_path_str],
+                "output_files": [],
+                "log_file": f"simulation/runs/{run_id}/solver_log.txt",
+                "warnings": warnings,
+                "errors": errors,
+            }
+            if frd_path:
+                solver_run["output_files"].append(f"simulation/runs/{run_id}/outputs/result.frd")
+
+            # Write artifacts back into package
+            run_prefix = f"simulation/runs/{run_id}"
+
+            def _write_safe(artifact_path: str, source: _Path) -> None:
+                try:
+                    art = write_artifact_to_package(
+                        package_path, artifact_path, source, overwrite=overwrite
+                    )
+                    changed_artifacts.append(art)
+                except FileExistsError:
+                    warnings.append(f"{artifact_path} already exists and overwrite=False")
+                except Exception as exc:
+                    warnings.append(f"Failed to write {artifact_path}: {exc}")
+
+            _write_safe(f"{run_prefix}/solver_input.inp", local_inp)
+            _write_safe(f"{run_prefix}/solver_log.txt", log_path)
+
+            run_json_path = work_dir / "solver_run.json"
+            run_json_path.write_text(json.dumps(solver_run, indent=2), encoding="utf-8")
+            _write_safe(f"{run_prefix}/solver_run.json", run_json_path)
+
+            if frd_path:
+                _write_safe(f"{run_prefix}/outputs/result.frd", frd_path)
+
+            # Extract FRD results if requested
+            extracted_metrics: dict[str, Any] | None = None
+            if extract_results and frd_path:
+                try:
+                    ext_result = aieng_bridge.extract_frd_solver_results(
+                        str(package_path),
+                        str(frd_path),
+                        aieng_root=active_settings.aieng_root,
+                        load_case_id=load_case_id,
+                        software=solver,
+                        overwrite=overwrite,
+                    )
+                    extracted_metrics = ext_result.get("metrics")
+                    changed_artifacts.extend(ext_result.get("artifacts", []))
+                except Exception as exc:
+                    warnings.append(f"FRD extraction failed: {exc}")
+
+            # Refresh summaries if requested
+            refreshed_summaries: list[str] = []
+            if refresh_summary:
+                try:
+                    aieng_bridge.refresh_cae_result_summary(
+                        str(package_path),
+                        aieng_root=active_settings.aieng_root,
+                        overwrite=True,
+                    )
+                    refreshed_summaries.append("result_summary")
+                except Exception as exc:
+                    warnings.append(f"CAE result summary refresh failed: {exc}")
+
+                try:
+                    aieng_bridge.refresh_preprocessing_summary(
+                        str(package_path),
+                        aieng_root=active_settings.aieng_root,
+                        overwrite=True,
+                    )
+                    refreshed_summaries.append("preprocessing_summary")
+                except Exception as exc:
+                    warnings.append(f"Preprocessing summary refresh failed: {exc}")
+
+            result: dict[str, Any] = {
+                "ok": True,
+                "tool": "cae.run_solver",
+                "status": "completed" if solved else "failed",
+                "solver_execution_performed": True,
+                "return_code": return_code,
+                "changed_artifacts": changed_artifacts,
+                "warnings": warnings,
+                "errors": errors,
+            }
+            if extracted_metrics is not None:
+                result["extracted_metrics"] = extracted_metrics
+            if refreshed_summaries:
+                result["refreshed_summaries"] = refreshed_summaries
+            return result
+
+        finally:
+            try:
+                shutil.rmtree(temp_dir, ignore_errors=True)
+            except Exception:
+                pass
+
     def _tool_freecad_run_macro(_inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
         # The execute_run() approval gate should prevent this from being called.
         # This body is a defensive belt-and-suspenders guard.
@@ -2601,6 +2893,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Inspect a .aieng package and return a reviewable solver run preflight plan. "
             "Checks for mesh, solver settings, load case, and input deck presence. "
             "No solver is executed; returns requires_approval=true and solver_execution_performed=false."
+        ),
+    )
+    _rt.register_tool(
+        "cae.run_solver",
+        _tool_cae_run_solver,
+        requires_approval=True,
+        description=(
+            "Execute an external CalculiX solver run on an existing input deck. "
+            "Copies the .inp into a temp directory, runs ccx with a timeout, "
+            "captures stdout/stderr, and writes solver_run.json, solver_log.txt, "
+            "and result.frd back into the .aieng package. "
+            "Requires explicit approval before execution."
         ),
     )
     _rt.register_tool(

@@ -75,6 +75,10 @@ aieng local runtime          ← backend/app/runtime.py  (already exists)
         ├── aieng.read_audit_log
         ├── freecad.inspect_geometry
         ├── freecad.export_step
+        ├── cae.apply_setup_patch
+        ├── cae.extract_solver_results
+        ├── cae.prepare_solver_run
+        ├── cae.run_solver  (approval-gated)
         └── freecad.run_macro  (approval-gated)
 ```
 

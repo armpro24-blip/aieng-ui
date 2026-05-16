@@ -11,7 +11,7 @@ Web workbench and FastAPI service for the `.aieng` engineering platform.
 - **Local orchestration runtime** — `RunRecord`, `ToolCall`, `ToolResult`, `RuntimeEvent` types; intent-based plan builder; synchronous executor with approval gate
 - **CAD provider registry** — pluggable `CadProvider` interface; FreeCAD is the first implementation
 
-Nine registered runtime tools (7 working + 2 skeleton):
+Thirteen registered runtime tools (11 working + 2 skeleton):
 
 | Tool | Status |
 |------|--------|
@@ -23,6 +23,10 @@ Nine registered runtime tools (7 working + 2 skeleton):
 | `freecad.export_step` | Working — FreeCADCmd bridge; writes `{stem}_export.step` |
 | `postprocess.generate_computed_metrics` | Working — normalizes external metrics into `computed_metrics.json` and writes it back into the `.aieng` package |
 | `postprocess.refresh_cae_summary` | Working — regenerates CAE result summary, evidence index, and markdown |
+| `cae.apply_setup_patch` | Working — controlled patches to CAE setup artifacts |
+| `cae.extract_solver_results` | Working — parses CalculiX FRD and writes `computed_metrics.json` |
+| `cae.prepare_solver_run` | Working — preflight inspection, no solver execution |
+| `cae.run_solver` | Working — external CalculiX execution adapter MVP, approval-gated |
 | `freecad.run_macro` | Skeleton, approval-gated |
 
 External agents (Claude Code, Codex, custom MCP clients) can access all runtime tools via the MCP bridge in `aieng_freecad_mcp`. See [`../docs/runtime_and_agents.md`](../docs/runtime_and_agents.md).
