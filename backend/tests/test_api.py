@@ -3028,3 +3028,160 @@ def test_run_solver_no_mesh_generation(tmp_path: Path) -> None:
     # Only one subprocess invocation: ccx
     assert len(calls) == 1
     assert calls[0] == ["/fake/ccx", "solver_input"]
+
+
+def test_vertical_cae_workflow_end_to_end(tmp_path: Path) -> None:
+    """Full CAE vertical workflow: preflight -> solver run -> FRD extraction -> summary refresh.
+
+    This is the Phase 22 benchmark / agent-run vertical demo. It demonstrates that
+    the runtime can execute the full CAE lifecycle -- preflight, external solver
+    execution (mocked), FRD scalar extraction, and summary refresh -- entirely
+    through the runtime REST API, producing honest evidence-backed results.
+    """
+    from unittest.mock import patch, MagicMock
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    def _output_for_tool(run_data: dict[str, Any], tool_name: str) -> dict[str, Any]:
+        for tc, tr in zip(run_data["tool_calls"], run_data["tool_results"]):
+            if tc["name"] == tool_name:
+                return tr["output"]
+        raise AssertionError(f"Tool {tool_name} not found in run tool_calls")
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    # fixture: generic .aieng package with all CAE setup artifacts
+    project = save_project(settings, default_project("cae-benchmark"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "benchmark.aieng"
+    _make_preflight_package(pkg_path, mesh=True, solver_settings=True, load_case=True, input_deck=True)
+    project["aieng_file"] = "benchmark.aieng"
+    save_project(settings, project)
+
+    # Mock ccx availability for both preflight and solver run
+    with patch("app.main.shutil.which", return_value="/fake/ccx"):
+        # Step 1: prepare solver run (reads evidence, no execution)
+        resp = client.post("/api/runtime/runs", json={
+            "message": "prepare solver run",
+            "project_id": project_id,
+            "tool_input": {"project_id": project_id, "run_id": "run_001"},
+        })
+        assert resp.status_code == 200
+        preflight = resp.json()["tool_results"][0]["output"]
+        assert preflight["ok"] is True
+        assert preflight["solver_execution_performed"] is False
+        assert preflight["ready_to_run"] is True
+
+        # Step 2: run solver (mocked ccx producing a parseable FRD)
+        def fake_run(cmd, **kwargs):
+            cwd = Path(kwargs.get("cwd", "."))
+            frd_path = cwd / "solver_input.frd"
+            frd_path.write_text(
+                _make_test_frd(
+                    {1: [1.0, 0.0, 0.0, 1.0], 2: [5.0, 0.0, 0.0, 5.0]},
+                    {1: [200.0, 100.0, 50.0, 10.0, 0.0, 0.0]},
+                ),
+                encoding="utf-8",
+            )
+            return MagicMock(returncode=0, stdout="solver completed\n", stderr="")
+
+        with patch("subprocess.run", side_effect=fake_run):
+            resp = client.post("/api/runtime/runs", json={
+                "message": "execute solver run",
+                "project_id": project_id,
+                "tool_input": {
+                    "project_id": project_id,
+                    "run_id": "run_001",
+                    "input_deck_path": "simulation/runs/run_001/solver_input.inp",
+                    "extract_results": False,
+                    "refresh_summary": False,
+                },
+            })
+            assert resp.status_code == 200
+            run_data = resp.json()
+            # Approval gate: cae.run_solver requires explicit approval
+            assert run_data["status"] == "awaiting_approval"
+            run_id = run_data["run_id"]
+            approve_resp = client.post(f"/api/runtime/runs/{run_id}/approve")
+            assert approve_resp.status_code == 200
+            run_data = approve_resp.json()
+
+    result = run_data["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert result["solver_execution_performed"] is True
+    assert result["return_code"] == 0
+    assert result["status"] == "completed"
+    assert any("solver_run.json" in a["path"] for a in result["changed_artifacts"])
+    assert any("solver_log.txt" in a["path"] for a in result["changed_artifacts"])
+    assert any("result.frd" in a["path"] for a in result["changed_artifacts"])
+
+    # Verify solver artifacts persisted in the package
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        names = zf.namelist()
+        assert "simulation/runs/run_001/solver_run.json" in names
+        assert "simulation/runs/run_001/solver_log.txt" in names
+        assert "simulation/runs/run_001/outputs/result.frd" in names
+        solver_run = json.loads(zf.read("simulation/runs/run_001/solver_run.json"))
+    assert solver_run["solved"] is True
+    assert solver_run["converged"] is None  # conservative: no reliable convergence evidence
+
+    # Step 3: extract FRD scalar results
+    frd_path = tmp_path / "solver_input.frd"
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        frd_content = zf.read("simulation/runs/run_001/outputs/result.frd")
+    frd_path.write_bytes(frd_content)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "extract solver results",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "frdPath": str(frd_path),
+            "loadCaseId": "load_case_001",
+            "refresh_result_summary": False,
+        },
+    })
+    assert resp.status_code == 200
+    extract_result = resp.json()["tool_results"][0]["output"]
+    assert extract_result["status"] == "ok"
+    assert any(a["path"] == "results/computed_metrics.json" for a in extract_result["artifacts"])
+
+    # Verify computed_metrics.json inside the package
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        assert "results/computed_metrics.json" in zf.namelist()
+        metrics = json.loads(zf.read("results/computed_metrics.json"))
+    assert metrics["schema_version"] == "0.1"
+    lc = metrics["load_cases"][0]
+    assert lc["id"] == "load_case_001"
+    assert abs(lc["metrics"]["max_displacement"]["value"] - 5.0) < 1e-4
+    assert "max_von_mises_stress" in lc["metrics"]
+
+    # Step 4: refresh CAE result summary
+    resp = client.post("/api/runtime/runs", json={
+        "message": "refresh cae summary",
+        "project_id": project_id,
+        "tool_input": {"project_id": project_id, "overwrite": True},
+    })
+    assert resp.status_code == 200
+    refresh_run = resp.json()
+    refresh_result = _output_for_tool(refresh_run, "postprocess.refresh_cae_summary")
+    assert refresh_result["status"] == "ok"
+
+    # Verify the summary endpoint now reports real extrema
+    resp = client.get(f"/api/projects/{project_id}/cae-result-summary")
+    assert resp.status_code == 200
+    summary = resp.json()
+    assert summary["computed_values"]["extrema_computed"] is True
+    assert summary["computed_values"]["max_displacement"] is not None
+    assert summary["computed_values"]["max_von_mises_stress"] is not None
+    assert len(summary["llm_summary"]["limitations"]) > 0
+
+    # Benchmark checklist
+    assert preflight["solver_execution_performed"] is False  # reads evidence before acting
+    assert result["solver_execution_performed"] is True      # uses prepare/run/extract flow
+    assert run_data["status"] == "completed"                 # approval semantics respected
+    assert solver_run["converged"] is None                   # does not claim convergence
+    assert extract_result["status"] == "ok"                  # distinguishes extraction from execution
+    assert "limitations" in summary["llm_summary"]           # reports limitations honestly
