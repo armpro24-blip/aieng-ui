@@ -904,6 +904,68 @@ def _json_diff_paths(
 
 
 # ---------------------------------------------------------------------------
+# Solver input deck import (Phase 29)
+# ---------------------------------------------------------------------------
+# Closes the biggest functional gap in the vertical CAE MVP: the runtime
+# previously assumed a `.inp` deck already existed inside the package. This
+# importer accepts a pre-existing deck (typically authored externally) and
+# writes it into the canonical run path so cae.run_solver can find it.
+#
+# This is import only — no mesh generation, no input deck generation, no
+# physical correctness validation. The minimal parse below just confirms
+# CalculiX keyword syntax is plausible; it does not validate the analysis.
+
+_SOLVER_INPUT_MAX_BYTES = 10 * 1024 * 1024
+_RUN_ID_PATTERN = re.compile(r"^[a-zA-Z0-9_-]{1,64}$")
+
+
+def _is_safe_run_id(run_id: str) -> bool:
+    return bool(_RUN_ID_PATTERN.match(run_id))
+
+
+def _parse_calculix_input_deck(text: str) -> dict[str, Any]:
+    """Minimal CalculiX `.inp` keyword scan.
+
+    Returns ``{"keywords": [...], "keyword_count": N, "warnings": [...]}``.
+    Detects CalculiX keyword lines (lines starting with ``*`` and not ``**``
+    which is a comment). Does NOT validate the analysis: card order, parameter
+    values, mesh consistency, and material laws are all out of scope.
+    """
+    keywords: list[str] = []
+    warnings: list[str] = []
+    saw_step = False
+    saw_node = False
+
+    for raw in text.splitlines():
+        stripped = raw.strip()
+        if not stripped or stripped.startswith("**"):
+            continue
+        if not stripped.startswith("*"):
+            continue
+        head = stripped[1:].split(",", 1)[0].strip().upper()
+        if not head:
+            continue
+        keywords.append(head)
+        if head == "STEP":
+            saw_step = True
+        elif head == "NODE":
+            saw_node = True
+
+    if not keywords:
+        warnings.append("no CalculiX keywords (lines starting with '*') detected")
+    if not saw_node:
+        warnings.append("no *NODE block detected; deck may be incomplete")
+    if not saw_step:
+        warnings.append("no *STEP block detected; deck may be incomplete")
+
+    return {
+        "keywords": keywords,
+        "keyword_count": len(keywords),
+        "warnings": warnings,
+    }
+
+
+# ---------------------------------------------------------------------------
 # cae.apply_setup_patch — constants and helpers
 # ---------------------------------------------------------------------------
 
@@ -2092,6 +2154,112 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         if package_path is None or not package_path.exists():
             raise HTTPException(status_code=404, detail=".aieng package not found")
         return _read_artifact_from_package(package_path, path)
+
+    @app.post("/api/projects/{project_id}/solver-input")
+    def import_solver_input(
+        project_id: str,
+        payload: dict[str, Any] = Body(default=None),
+    ) -> dict[str, Any]:
+        """Import a CalculiX `.inp` solver input deck into the package.
+
+        Phase 29 — closes the biggest functional gap in the vertical CAE MVP
+        (the runtime previously required a pre-existing deck inside the
+        package). This endpoint writes a caller-supplied deck to the
+        canonical run path so ``cae.run_solver`` and ``cae.prepare_solver_run``
+        can find it.
+
+        Import only. Does NOT execute the solver, generate a mesh, generate a
+        deck, or validate physical correctness. The minimal parse below just
+        scans for CalculiX keyword lines so obviously empty or wrong-format
+        bodies are rejected with a 400.
+
+        Body:
+            ``text`` (str, required): the `.inp` content as utf-8 text.
+            ``run_id`` (str, optional): defaults to ``"run_001"``.
+                Must match ``^[a-zA-Z0-9_-]{1,64}$``.
+            ``overwrite`` (bool, optional): defaults to ``True``.
+
+        Returns:
+            ``{ok, package_path, artifact, keyword_count, keywords, warnings}``.
+            The deck lands at ``simulation/runs/{run_id}/solver_input.inp``.
+        """
+        body = payload or {}
+        text = body.get("text")
+        if not isinstance(text, str) or not text.strip():
+            raise HTTPException(
+                status_code=400,
+                detail="body must contain a non-empty 'text' string with the .inp content",
+            )
+        size_bytes = len(text.encode("utf-8"))
+        if size_bytes > _SOLVER_INPUT_MAX_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail=(
+                    f"solver input deck {size_bytes} bytes exceeds cap "
+                    f"{_SOLVER_INPUT_MAX_BYTES}"
+                ),
+            )
+        run_id = str(body.get("run_id") or "run_001")
+        if not _is_safe_run_id(run_id):
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "run_id must match ^[a-zA-Z0-9_-]{1,64}$ "
+                    "(no path separators, no traversal)"
+                ),
+            )
+        overwrite = bool(body.get("overwrite", True))
+
+        parse = _parse_calculix_input_deck(text)
+        if parse["keyword_count"] == 0:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    "no CalculiX keywords found in body 'text'; "
+                    "expected at least one line starting with '*'"
+                ),
+            )
+
+        project = get_project(active_settings, project_id)
+        package_path = resolve_project_path(
+            active_settings, project_id, project.get("aieng_file")
+        )
+        if package_path is None or not package_path.exists():
+            raise HTTPException(status_code=404, detail=".aieng package not found")
+
+        artifact_path = f"simulation/runs/{run_id}/solver_input.inp"
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".inp", delete=False, encoding="utf-8", newline=""
+        ) as fh:
+            fh.write(text)
+            tmp_path = Path(fh.name)
+        try:
+            try:
+                artifact = write_artifact_to_package(
+                    package_path,
+                    artifact_path,
+                    tmp_path,
+                    overwrite=overwrite,
+                )
+            except FileExistsError as exc:
+                raise HTTPException(status_code=409, detail=str(exc)) from exc
+        finally:
+            tmp_path.unlink(missing_ok=True)
+
+        artifact["kind"] = "solver_input"
+        artifact["role"] = "solver_input_deck"
+        artifact["size_bytes"] = size_bytes
+        artifact.pop("source_path", None)
+
+        return {
+            "ok": True,
+            "package_path": str(package_path),
+            "run_id": run_id,
+            "artifact": artifact,
+            "keyword_count": parse["keyword_count"],
+            "keywords": parse["keywords"],
+            "warnings": parse["warnings"],
+        }
 
     @app.post("/api/projects/{project_id}/artifact/diff")
     def diff_project_artifact(

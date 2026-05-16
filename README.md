@@ -58,9 +58,15 @@ they exist so a reviewer (or agent) can inspect what the runtime wrote.
 |---|---|
 | `GET /api/projects/{project_id}/artifact?path=...` | Read a single artifact from the project's `.aieng` package. Returns `{path, exists, media_type, size_bytes?, parsed_json?, text?, warnings}`. JSON files are parsed when ≤ 2 MB; text files are inlined when ≤ 256 KB. Missing artifacts return `exists: false` with 200. Path traversal, absolute paths, and backslashes are rejected with 400. |
 | `POST /api/projects/{project_id}/artifact/diff` | Compute RFC-6901 JSON Pointer paths for differences between two JSON values supplied in the body as `{before, after}`. Returns `{changed_paths, added_paths, removed_paths}`. Pure computation; no package access. |
+| `POST /api/projects/{project_id}/solver-input` | Import a CalculiX `.inp` solver input deck into the package. Body: `{text, run_id?, overwrite?}`. Writes to `simulation/runs/{run_id}/solver_input.inp` (default `run_id` `"run_001"`). Minimal CalculiX keyword scan rejects obvious non-decks; missing `*NODE` / `*STEP` blocks are accepted with warnings. Import only — no mesh generation, no deck generation, no physical correctness validation. 10 MB cap. |
 
-Pair the two: capture a JSON artifact before an action, capture it again
+Pair the two reads: capture a JSON artifact before an action, capture it again
 after, then POST both to `/artifact/diff` to surface the structural delta.
+
+The solver-input importer closes the biggest functional gap in the vertical
+CAE MVP — `cae.run_solver` previously assumed the deck was already present
+inside the package. Pair this endpoint with `aieng_get_cae_preprocessing_summary`
+(or `cae.prepare_solver_run`) before approving execution.
 
 The artifact inspector is exposed in the CAE panel of the React SPA: enter an
 artifact path (e.g. `results/computed_metrics.json`) to view parsed JSON or

@@ -3795,3 +3795,213 @@ def test_artifact_diff_rejects_missing_before_after(tmp_path: Path) -> None:
     )
     assert resp.status_code == 400
     assert "before" in resp.json()["detail"] and "after" in resp.json()["detail"]
+
+
+# ---------------------------------------------------------------------------
+# Phase 29 — solver input deck import endpoint
+# ---------------------------------------------------------------------------
+
+_FIXTURE_INP_PATH = Path(__file__).resolve().parent / "fixtures" / "minimal_cantilever.inp"
+
+
+def _read_fixture_inp() -> str:
+    return _FIXTURE_INP_PATH.read_text(encoding="utf-8")
+
+
+def test_solver_input_happy_path_writes_into_package(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+    deck = _read_fixture_inp()
+
+    resp = client.post(
+        f"/api/projects/{pid}/solver-input",
+        json={"text": deck},
+    )
+    assert resp.status_code == 200, resp.text
+    body = resp.json()
+    assert body["ok"] is True
+    assert body["run_id"] == "run_001"
+    assert body["artifact"]["path"] == "simulation/runs/run_001/solver_input.inp"
+    assert body["artifact"]["kind"] == "solver_input"
+    assert body["artifact"]["role"] == "solver_input_deck"
+    assert body["artifact"]["size_bytes"] == len(deck.encode("utf-8"))
+    assert body["keyword_count"] > 0
+    # The fixture deck has *HEADING / *NODE / *ELEMENT / *MATERIAL / *STEP etc.
+    assert "HEADING" in body["keywords"]
+    assert "NODE" in body["keywords"]
+    assert "STEP" in body["keywords"]
+    # No missing-block warnings for a complete deck.
+    assert all("*NODE" not in w and "*STEP" not in w for w in body["warnings"])
+
+    # The package now contains the deck on disk at the canonical path.
+    from app.main import get_project, resolve_project_path
+
+    settings = _make_runtime_settings(tmp_path)
+    project = get_project(settings, pid)
+    package_path = resolve_project_path(settings, pid, project["aieng_file"])
+    with zipfile.ZipFile(package_path, "r") as zf:
+        assert "simulation/runs/run_001/solver_input.inp" in zf.namelist()
+        assert zf.read("simulation/runs/run_001/solver_input.inp").decode("utf-8") == deck
+
+
+def test_solver_input_custom_run_id(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+    deck = _read_fixture_inp()
+
+    resp = client.post(
+        f"/api/projects/{pid}/solver-input",
+        json={"text": deck, "run_id": "experiment_42"},
+    )
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["run_id"] == "experiment_42"
+    assert body["artifact"]["path"] == "simulation/runs/experiment_42/solver_input.inp"
+
+
+def test_solver_input_overwrites_existing_by_default(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+
+    deck_a = "*HEADING\nfirst\n*NODE\n1, 0, 0, 0\n*STEP\n*STATIC\n*END STEP\n"
+    deck_b = "*HEADING\nsecond\n*NODE\n2, 1, 1, 1\n*STEP\n*STATIC\n*END STEP\n"
+
+    resp1 = client.post(f"/api/projects/{pid}/solver-input", json={"text": deck_a})
+    assert resp1.status_code == 200
+
+    resp2 = client.post(f"/api/projects/{pid}/solver-input", json={"text": deck_b})
+    assert resp2.status_code == 200
+
+    from app.main import get_project, resolve_project_path
+
+    settings = _make_runtime_settings(tmp_path)
+    project = get_project(settings, pid)
+    package_path = resolve_project_path(settings, pid, project["aieng_file"])
+    with zipfile.ZipFile(package_path, "r") as zf:
+        contents = zf.read("simulation/runs/run_001/solver_input.inp").decode("utf-8")
+    assert contents == deck_b
+
+
+def test_solver_input_overwrite_false_conflicts(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+    deck = "*HEADING\nfirst\n*NODE\n1, 0, 0, 0\n*STEP\n*STATIC\n*END STEP\n"
+
+    resp1 = client.post(f"/api/projects/{pid}/solver-input", json={"text": deck})
+    assert resp1.status_code == 200
+
+    resp2 = client.post(
+        f"/api/projects/{pid}/solver-input",
+        json={"text": deck, "overwrite": False},
+    )
+    assert resp2.status_code == 409
+
+
+def test_solver_input_rejects_empty_text(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+
+    resp = client.post(f"/api/projects/{pid}/solver-input", json={"text": ""})
+    assert resp.status_code == 400
+    assert "text" in resp.json()["detail"]
+
+
+def test_solver_input_rejects_missing_text(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+
+    resp = client.post(f"/api/projects/{pid}/solver-input", json={})
+    assert resp.status_code == 400
+
+
+def test_solver_input_rejects_non_string_text(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+
+    resp = client.post(f"/api/projects/{pid}/solver-input", json={"text": 42})
+    assert resp.status_code == 400
+
+
+def test_solver_input_rejects_text_without_keywords(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+
+    resp = client.post(
+        f"/api/projects/{pid}/solver-input",
+        json={"text": "this is not a CalculiX deck\njust prose\n"},
+    )
+    assert resp.status_code == 400
+    assert "CalculiX" in resp.json()["detail"]
+
+
+def test_solver_input_rejects_run_id_traversal(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+    deck = _read_fixture_inp()
+
+    resp = client.post(
+        f"/api/projects/{pid}/solver-input",
+        json={"text": deck, "run_id": "../etc"},
+    )
+    assert resp.status_code == 400
+
+
+def test_solver_input_rejects_run_id_with_slash(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+    deck = _read_fixture_inp()
+
+    resp = client.post(
+        f"/api/projects/{pid}/solver-input",
+        json={"text": deck, "run_id": "run/001"},
+    )
+    assert resp.status_code == 400
+
+
+def test_solver_input_rejects_oversized_deck(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+    # Build a >10 MB string with a valid header so size triggers before parse.
+    header = "*HEADING\noversized\n*NODE\n"
+    bulk = ("1, 0.0, 0.0, 0.0\n") * 700_000
+    deck = header + bulk
+    assert len(deck.encode("utf-8")) > 10 * 1024 * 1024
+
+    resp = client.post(f"/api/projects/{pid}/solver-input", json={"text": deck})
+    assert resp.status_code == 413
+
+
+def test_solver_input_warns_on_incomplete_deck(tmp_path: Path) -> None:
+    client, pid = _setup_project_with_package(tmp_path, {})
+    # A deck with a keyword but missing *NODE and *STEP — accepted with warnings.
+    minimal = "*HEADING\nincomplete\n"
+
+    resp = client.post(f"/api/projects/{pid}/solver-input", json={"text": minimal})
+    assert resp.status_code == 200
+    body = resp.json()
+    assert body["ok"] is True
+    assert any("*NODE" in w for w in body["warnings"])
+    assert any("*STEP" in w for w in body["warnings"])
+
+
+def test_solver_input_404_when_package_missing(tmp_path: Path) -> None:
+    from app.main import default_project
+
+    settings = _make_runtime_settings(tmp_path)
+    project = save_project(settings, default_project("no-package-import"))
+    client = TestClient(create_app(settings))
+
+    resp = client.post(
+        f"/api/projects/{project['id']}/solver-input",
+        json={"text": _read_fixture_inp()},
+    )
+    assert resp.status_code == 404
+
+
+def test_solver_input_imported_deck_is_visible_via_artifact_api(tmp_path: Path) -> None:
+    """The artifact-read endpoint should surface the just-imported deck so a
+    reviewer can confirm what landed inside the package before running it."""
+    client, pid = _setup_project_with_package(tmp_path, {})
+    deck = _read_fixture_inp()
+
+    post = client.post(f"/api/projects/{pid}/solver-input", json={"text": deck})
+    assert post.status_code == 200
+
+    get = client.get(
+        f"/api/projects/{pid}/artifact",
+        params={"path": "simulation/runs/run_001/solver_input.inp"},
+    )
+    assert get.status_code == 200
+    body = get.json()
+    assert body["exists"] is True
+    assert body["media_type"] == "text/plain"
+    assert body["text"] == deck
