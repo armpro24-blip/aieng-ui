@@ -104,6 +104,7 @@ A vertical CAE workflow benchmark (`test_vertical_cae_workflow_end_to_end`) demo
 Repo-level docs:
 
 - [Runtime architecture](docs/runtime_architecture.md) — orchestration layer, tool adapters, FreeCAD bridge paths
+- [Vertical CAE MVP milestone](docs/milestone-vertical-cae-mvp.md) — current MVP positioning, real capabilities, boundaries, and check commands
 
 Workspace-level docs (covers all three repos):
 
