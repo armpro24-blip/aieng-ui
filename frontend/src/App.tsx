@@ -688,6 +688,10 @@ export default function App() {
   const [metricsLoadCaseId, setMetricsLoadCaseId] = useState("load_case_001");
   const [metricsSoftware, setMetricsSoftware] = useState("");
   const [metricsImporting, setMetricsImporting] = useState(false);
+  const [frdInputPath, setFrdInputPath] = useState("");
+  const [frdLoadCaseId, setFrdLoadCaseId] = useState("load_case_001");
+  const [frdSoftware, setFrdSoftware] = useState("CalculiX");
+  const [frdExtracting, setFrdExtracting] = useState(false);
   const [capabilities, setCapabilities] = useState<CapabilityDescriptor[]>([]);
   const [capabilityCategory, setCapabilityCategory] = useState("all");
   const [capabilityQuery, setCapabilityQuery] = useState("");
@@ -1273,6 +1277,48 @@ export default function App() {
       setNotice({ tone: "error", title: "导入计算指标失败", detail });
     } finally {
       setMetricsImporting(false);
+    }
+  }
+
+  async function extractFrdAndRefresh() {
+    if (!selectedId || frdExtracting) return;
+    const frdPath = frdInputPath.trim();
+    if (!frdPath) {
+      setNotice({ tone: "info", title: "请输入 FRD 文件路径", detail: "需要提供 CalculiX .frd 结果文件的绝对路径。" });
+      return;
+    }
+    setFrdExtracting(true);
+    setNotice(null);
+    try {
+      const extractRun = await api.startRun("extract solver results", selectedId, {
+        project_id: selectedId,
+        frdPath: frdPath,
+        loadCaseId: frdLoadCaseId.trim() || "load_case_001",
+        software: frdSoftware.trim() || "CalculiX",
+        refresh_result_summary: true,
+      });
+      setLastRuntimeRun(extractRun);
+      appendRunToChatHistory(extractRun);
+      if (extractRun.status !== "completed") {
+        setNotice({
+          tone: "error",
+          title: "FRD 提取失败",
+          detail: extractRun.errors[0] || extractRun.summary || "运行时返回非成功状态。",
+        });
+        setFrdExtracting(false);
+        return;
+      }
+      await refreshProjects(selectedId);
+      setNotice({
+        tone: "success",
+        title: "FRD 结果已提取并刷新摘要",
+        detail: extractRun.summary || "已从 .frd 文件提取最大位移和最大 von Mises 应力，并重新生成 CAE 结果摘要。",
+      });
+    } catch (error) {
+      const detail = error instanceof Error ? error.message : String(error);
+      setNotice({ tone: "error", title: "FRD 提取失败", detail });
+    } finally {
+      setFrdExtracting(false);
     }
   }
 
@@ -2022,6 +2068,43 @@ export default function App() {
                         onClick={() => void importMetricsAndRefresh()}
                       >
                         {metricsImporting ? "正在导入并刷新…" : "导入计算指标并刷新摘要"}
+                      </button>
+                    </div>
+                  </div>
+                  <div className="summary-note" style={{ marginTop: 12 }}>
+                    <strong>从 FRD 文件提取求解器结果</strong>
+                    <p style={{ fontSize: 12, margin: "4px 0 8px" }}>
+                      解析 CalculiX .frd 文件，提取节点位移和应力场极值（最大位移、最大 von Mises 应力），写入 .aieng 包并刷新结果摘要。不执行求解器。
+                    </p>
+                    <input
+                      type="text"
+                      placeholder="C:\path\to\job.frd"
+                      value={frdInputPath}
+                      onChange={(e) => setFrdInputPath(e.target.value)}
+                      style={{ width: "100%", marginBottom: 6 }}
+                    />
+                    <div style={{ display: "flex", gap: 8, marginBottom: 6 }}>
+                      <input
+                        type="text"
+                        placeholder="Load case ID"
+                        value={frdLoadCaseId}
+                        onChange={(e) => setFrdLoadCaseId(e.target.value)}
+                        style={{ flex: 1 }}
+                      />
+                      <input
+                        type="text"
+                        placeholder="Software (e.g. CalculiX)"
+                        value={frdSoftware}
+                        onChange={(e) => setFrdSoftware(e.target.value)}
+                        style={{ flex: 1 }}
+                      />
+                    </div>
+                    <div className="action-row">
+                      <button
+                        disabled={frdExtracting || !selectedId}
+                        onClick={() => void extractFrdAndRefresh()}
+                      >
+                        {frdExtracting ? "正在提取并刷新…" : "提取 FRD 结果并刷新摘要"}
                       </button>
                     </div>
                   </div>
