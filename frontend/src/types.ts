@@ -544,6 +544,17 @@ export type ArtifactDiffResponse = {
   removed_paths: string[];
 };
 
+export type ArtifactDiff = {
+  path: string;
+  operation: string;
+  json_pointer: string;
+  before: unknown;
+  after: unknown;
+  changed_paths: string[];
+  added_paths: string[];
+  removed_paths: string[];
+};
+
 export type ChatResponse = {
   reply: string;
   plan: ChatStep[];

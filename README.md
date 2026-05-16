@@ -68,6 +68,12 @@ text inline. Clickable artifact paths appear in the CAE artifact grid and in
 runtime chat history for low-risk file types (`.json`, `.txt`, `.md`, `.yaml`,
 `.yml`, `.inp`, `.csv`, `.log`).
 
+When `cae.apply_setup_patch` changes setup artifacts, the runtime chat bubble
+shows an **artifact diff** panel: path, operation, JSON pointer, changed/added/
+removed RFC-6901 paths, and compact before/after values. This is evidence review
+metadata only — it does not prove physical correctness or mean the solver was
+rerun. Stale-artifact warnings remain visible.
+
 ## Quickstart
 
 ```bash

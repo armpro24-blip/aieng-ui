@@ -1055,9 +1055,9 @@ def _apply_single_patch(
 def _apply_patches_to_package(
     package_path: Path,
     patches: list[dict[str, Any]],
-) -> tuple[list[str], list[str]]:
+) -> tuple[list[str], list[str], list[dict[str, Any]]]:
     """
-    Apply all patches atomically to the package; returns (changed_paths, warning_msgs).
+    Apply all patches atomically to the package; returns (changed_paths, warning_msgs, artifact_diffs).
     Reads the whole ZIP, applies patches in-memory, writes a new ZIP atomically.
     """
     with zipfile.ZipFile(package_path, mode="r") as zf:
@@ -1071,6 +1071,7 @@ def _apply_patches_to_package(
 
     changed_paths: list[str] = []
     warnings_out: list[str] = []
+    artifact_diffs: list[dict[str, Any]] = []
 
     for patch in patches:
         path: str = patch.get("path", "")
@@ -1078,6 +1079,44 @@ def _apply_patches_to_package(
         new_bytes = _apply_single_patch(existing_bytes, patch, path)
         members[path] = new_bytes
         changed_paths.append(path)
+
+        action = patch.get("action_type") or patch.get("operation") or ""
+        diff_meta: dict[str, Any] = {
+            "path": path,
+            "operation": action,
+            "json_pointer": patch.get("pointer", ""),
+        }
+
+        if action == "create_file":
+            diff_meta["before"] = None
+            diff_meta["after"] = patch.get("content")
+            diff_meta["changed_paths"] = []
+            diff_meta["added_paths"] = [""]
+            diff_meta["removed_paths"] = []
+        elif action in ("replace_json", "merge_object", "append_array_item"):
+            before_doc = json.loads(existing_bytes) if existing_bytes else None
+            after_doc = json.loads(new_bytes)
+            changed, added, removed = _json_diff_paths(before_doc, after_doc)
+            diff_meta["changed_paths"] = changed
+            diff_meta["added_paths"] = added
+            diff_meta["removed_paths"] = removed
+            if action == "replace_json" and patch.get("pointer"):
+                pointer_str = patch.get("pointer", "")
+                tokens = _parse_json_pointer(pointer_str)
+                diff_meta["before"] = _json_pointer_get(before_doc, tokens) if before_doc is not None else None
+                diff_meta["after"] = _json_pointer_get(after_doc, tokens)
+            else:
+                diff_meta["before"] = before_doc
+                diff_meta["after"] = after_doc
+        else:
+            # Fallback for any future actions
+            diff_meta["before"] = None
+            diff_meta["after"] = None
+            diff_meta["changed_paths"] = []
+            diff_meta["added_paths"] = []
+            diff_meta["removed_paths"] = []
+
+        artifact_diffs.append(diff_meta)
 
     with tempfile.NamedTemporaryFile(
         delete=False, suffix=".aieng", dir=package_path.parent
@@ -1099,7 +1138,7 @@ def _apply_patches_to_package(
         if tmp_path.exists():
             tmp_path.unlink()
 
-    return changed_paths, warnings_out
+    return changed_paths, warnings_out, artifact_diffs
 
 
 def _compute_stale_artifacts(
@@ -2501,7 +2540,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 }
 
         try:
-            changed_paths, apply_warnings = _apply_patches_to_package(
+            changed_paths, apply_warnings, artifact_diffs = _apply_patches_to_package(
                 _Path(package_path), patches
             )
         except ValueError as exc:
@@ -2539,6 +2578,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             ],
             "refreshed_artifacts": refreshed_artifacts,
             "stale_artifacts": stale_artifacts,
+            "artifact_diffs": artifact_diffs,
             "warnings": all_warnings,
         }
 

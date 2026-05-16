@@ -2241,6 +2241,182 @@ def test_cae_setup_patch_returns_stale_artifacts_and_warnings(tmp_path: Path) ->
     assert any("evidence_index" in p for p in stale)
 
 
+def test_cae_setup_patch_replace_json_returns_artifact_diffs(tmp_path: Path) -> None:
+    """cae.apply_setup_patch replace_json returns artifact_diffs with path, operation, pointer, before, after, changed_paths."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("patch-diff-replace"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "patch-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "patch-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "apply cae setup patch",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "patches": [{
+                "path": "simulation/solver_settings.json",
+                "action_type": "replace_json",
+                "pointer": "/n_cpus",
+                "before": 4,
+                "value": 8,
+            }],
+            "refresh_preprocessing_summary": False,
+        },
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "ok"
+    diffs = result.get("artifact_diffs", [])
+    assert len(diffs) == 1
+    d = diffs[0]
+    assert d["path"] == "simulation/solver_settings.json"
+    assert d["operation"] == "replace_json"
+    assert d["json_pointer"] == "/n_cpus"
+    assert d["before"] == 4
+    assert d["after"] == 8
+    assert "/n_cpus" in d["changed_paths"]
+    assert d["added_paths"] == []
+    assert d["removed_paths"] == []
+
+
+def test_cae_setup_patch_create_file_returns_artifact_diffs(tmp_path: Path) -> None:
+    """cae.apply_setup_patch create_file returns artifact_diffs with added_paths and null before."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("patch-diff-create"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "patch-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "patch-test.aieng"
+    save_project(settings, project)
+
+    new_lc = {"id": "load_case_001", "loads": []}
+    resp = client.post("/api/runtime/runs", json={
+        "message": "apply cae setup patch",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "patches": [{
+                "path": "simulation/load_cases/load_case_001.json",
+                "action_type": "create_file",
+                "content": new_lc,
+            }],
+            "refresh_preprocessing_summary": False,
+        },
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "ok"
+    diffs = result.get("artifact_diffs", [])
+    assert len(diffs) == 1
+    d = diffs[0]
+    assert d["path"] == "simulation/load_cases/load_case_001.json"
+    assert d["operation"] == "create_file"
+    assert d["before"] is None
+    assert d["after"] == new_lc
+    assert d["added_paths"] == [""]
+    assert d["changed_paths"] == []
+    assert d["removed_paths"] == []
+
+
+def test_cae_setup_patch_merge_object_returns_artifact_diffs(tmp_path: Path) -> None:
+    """cae.apply_setup_patch merge_object returns artifact_diffs with changed/added paths."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("patch-diff-merge"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "patch-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "patch-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "apply cae setup patch",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "patches": [{
+                "path": "simulation/solver_settings.json",
+                "action_type": "merge_object",
+                "value": {"new_key": "new_value"},
+            }],
+            "refresh_preprocessing_summary": False,
+        },
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "ok"
+    diffs = result.get("artifact_diffs", [])
+    assert len(diffs) == 1
+    d = diffs[0]
+    assert d["path"] == "simulation/solver_settings.json"
+    assert d["operation"] == "merge_object"
+    assert "/new_key" in d["added_paths"]
+    # stale_artifacts should still be present
+    assert "stale_artifacts" in result
+    assert isinstance(result["stale_artifacts"], list)
+
+
+def test_cae_setup_patch_stale_artifacts_still_present(tmp_path: Path) -> None:
+    """cae.apply_setup_patch still returns stale_artifacts after setup changes even with artifact_diffs."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("patch-stale-28"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "patch-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "patch-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "apply cae setup patch",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "patches": [{
+                "path": "simulation/solver_settings.json",
+                "action_type": "replace_json",
+                "pointer": "/time_limit_s",
+                "value": 7200,
+            }],
+            "refresh_preprocessing_summary": False,
+        },
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "ok"
+    assert "artifact_diffs" in result
+    assert "stale_artifacts" in result
+    stale = result["stale_artifacts"]
+    assert isinstance(stale, list)
+    assert len(stale) > 0
+    assert any("result_summary" in p for p in stale)
+
+
 # ---------------------------------------------------------------------------
 # Phase 19 — cae.extract_solver_results runtime tool
 # ---------------------------------------------------------------------------

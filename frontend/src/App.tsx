@@ -5,7 +5,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 
 import { api } from "./api";
-import type { AgentPlan, ArtifactResponse, BenchmarkRun, BenchmarkScenario, CapabilityDescriptor, CapabilityPreview, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeRun, SolverFieldDescriptor, WorkflowDefinition } from "./types";
+import type { AgentPlan, ArtifactDiff, ArtifactResponse, BenchmarkRun, BenchmarkScenario, CapabilityDescriptor, CapabilityPreview, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeRun, SolverFieldDescriptor, WorkflowDefinition } from "./types";
 
 // Status labels for runtime runs
 function runtimeStatusLabel(status: RuntimeRun["status"]): string {
@@ -42,6 +42,7 @@ type ChatHistoryItem = {
   errors?: string[];
   auditLogUrl?: string | null;
   artifactPaths?: string[];
+  artifactDiffs?: ArtifactDiff[];
 };
 
 type ViewerLoadState = "idle" | "loading" | "ready" | "error";
@@ -1087,6 +1088,20 @@ export default function App() {
         ? `[本地运行时] ${statusLabel} — ${run.summary}${artifactLine ? "\n" + artifactLine : ""}`
         : `[本地运行时] ${statusLabel}${artifactLine ? "\n" + artifactLine : ""}`;
     const artifactPaths = extractArtifactPaths(run);
+
+    // Extract artifact_diffs from cae.apply_setup_patch output
+    let artifactDiffs: ArtifactDiff[] | undefined;
+    const patchResult = run.tool_results.find((tr) =>
+      tr.status === "success" &&
+      run.tool_calls.find((tc) => tc.id === tr.id && tc.name === "cae.apply_setup_patch")
+    );
+    if (patchResult && typeof patchResult.output === "object" && patchResult.output !== null) {
+      const diffs = (patchResult.output as Record<string, unknown>).artifact_diffs;
+      if (Array.isArray(diffs) && diffs.length > 0) {
+        artifactDiffs = diffs as ArtifactDiff[];
+      }
+    }
+
     setChatHistory((current) => [
       ...current,
       {
@@ -1099,6 +1114,7 @@ export default function App() {
         errors: run.errors,
         auditLogUrl: null,
         artifactPaths: artifactPaths.length ? artifactPaths : undefined,
+        artifactDiffs,
       },
     ]);
   }
@@ -2567,6 +2583,44 @@ export default function App() {
                       <div className="chat-error-list">
                         {entry.errors.map((error, index) => (
                           <small key={`${entry.id}-error-${index}`}>{error}</small>
+                        ))}
+                      </div>
+                    ) : null}
+                    {entry.artifactDiffs?.length ? (
+                      <div className="chat-artifact-diffs">
+                        <small>变更差异:</small>
+                        {entry.artifactDiffs.map((diff, idx) => (
+                          <div key={`${diff.path}-${idx}`} className="chat-diff-item">
+                            <div className="chat-diff-header">
+                              {isLowRiskArtifactPath(diff.path) ? (
+                                <button
+                                  type="button"
+                                  className="artifact-link"
+                                  onClick={() => void viewArtifact(diff.path)}
+                                  title={`查看 ${diff.path}`}
+                                >
+                                  {diff.path}
+                                </button>
+                              ) : (
+                                <span>{diff.path}</span>
+                              )}
+                              <span className="chat-diff-op">{diff.operation}</span>
+                              {diff.json_pointer ? <span className="chat-diff-pointer">{diff.json_pointer}</span> : null}
+                            </div>
+                            {diff.changed_paths.length > 0 || diff.added_paths.length > 0 || diff.removed_paths.length > 0 ? (
+                              <div className="chat-diff-paths">
+                                {diff.changed_paths.length > 0 ? <small>changed: {diff.changed_paths.join(", ")}</small> : null}
+                                {diff.added_paths.length > 0 ? <small>added: {diff.added_paths.join(", ")}</small> : null}
+                                {diff.removed_paths.length > 0 ? <small>removed: {diff.removed_paths.join(", ")}</small> : null}
+                              </div>
+                            ) : null}
+                            {(diff.before !== null || diff.after !== null) && JSON.stringify(diff.before).length < 200 && JSON.stringify(diff.after).length < 200 ? (
+                              <div className="chat-diff-values">
+                                <pre className="chat-diff-before">{JSON.stringify(diff.before, null, 2)}</pre>
+                                <pre className="chat-diff-after">{JSON.stringify(diff.after, null, 2)}</pre>
+                              </div>
+                            ) : null}
+                          </div>
                         ))}
                       </div>
                     ) : null}
