@@ -1,4 +1,5 @@
 ﻿import json
+import shutil
 import zipfile
 from pathlib import Path
 from typing import Any
@@ -3205,6 +3206,78 @@ def test_run_solver_no_mesh_generation(tmp_path: Path) -> None:
     # Only one subprocess invocation: ccx
     assert len(calls) == 1
     assert calls[0] == ["/fake/ccx", "solver_input"]
+
+
+@pytest.mark.skipif(
+    shutil.which("ccx") is None,
+    reason="CalculiX executable (ccx) not found on PATH — skipping real solver smoke test.",
+)
+def test_run_solver_real_ccx_skipped_if_unavailable(tmp_path: Path) -> None:
+    """Real CalculiX smoke test: runs ccx against minimal cantilever fixture if available.
+
+    This test verifies that the external solver adapter (cae.run_solver) can:
+      - locate a real ccx executable on PATH
+      - execute it in a temp working directory
+      - capture stdout/stderr and return code
+      - write solver_run.json, solver_log.txt, and result.frd back into the .aieng package
+
+    If ccx is not installed, the test is skipped cleanly so CI/environments without
+    CalculiX do not fail.
+    """
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("real-ccx-smoke"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "solver.aieng"
+
+    # Load the real fixture input deck
+    fixture_path = Path(__file__).with_name("fixtures") / "minimal_cantilever.inp"
+    inp_content = fixture_path.read_text(encoding="utf-8")
+
+    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "real-ccx-smoke", "resources": {}}))
+        zf.writestr("simulation/runs/run_001/solver_input.inp", inp_content)
+
+    project["aieng_file"] = "solver.aieng"
+    save_project(settings, project)
+
+    data = _execute_run_solver(client, project_id, {
+        "project_id": project_id,
+        "input_deck_path": "simulation/runs/run_001/solver_input.inp",
+        "extract_results": True,
+        "refresh_summary": True,
+    })
+
+    result = data["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert result["solver_execution_performed"] is True
+    assert result["return_code"] == 0
+    assert result["status"] == "completed"
+
+    # Verify artifacts were written back into the package
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        names = set(zf.namelist())
+        assert "simulation/runs/run_001/solver_run.json" in names
+        assert "simulation/runs/run_001/solver_log.txt" in names
+        assert "simulation/runs/run_001/solver_input.inp" in names
+        assert "simulation/runs/run_001/outputs/result.frd" in names
+
+        # Verify solver_run.json content
+        run_json = json.loads(zf.read("simulation/runs/run_001/solver_run.json"))
+        assert run_json["solver"] == "CalculiX"
+        assert run_json["solved"] is True
+        assert run_json["converged"] is None  # honest boundary: no convergence claim
+        assert run_json["return_code"] == 0
+        assert "simulation/runs/run_001/outputs/result.frd" in run_json["output_files"]
+
+    # Verify extracted metrics were produced
+    assert "extracted_metrics" in result
 
 
 def test_vertical_cae_workflow_end_to_end(tmp_path: Path) -> None:
