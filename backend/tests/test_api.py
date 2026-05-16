@@ -1713,3 +1713,686 @@ def run_benchmark(paths, config, provider, prepare_condition_b=None, progress=No
     assert data["dry_run"] is True
     assert data["result"]["mode"] == "dry_run"
     assert "secret" not in json.dumps(data)
+
+def test_get_cae_preprocessing_summary_endpoint(tmp_path: Path) -> None:
+    """GET /api/projects/{id}/cae-preprocessing-summary returns preprocessing summary."""
+    from app.main import Settings, create_app, default_project, project_dir, save_project
+    import zipfile
+
+    workspace = tmp_path / "workspace"
+    settings = Settings(
+        platform_root=tmp_path / "platform",
+        workspace_root=workspace,
+        data_root=tmp_path / "data",
+        aieng_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng"),
+        freecad_mcp_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng_freecad_mcp"),
+        freecad_home=workspace / "freecad",
+        sample_step=workspace / "sample.step",
+    )
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("preproc-test"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "preproc-test.aieng"
+    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "test", "resources": {}}))
+        zf.writestr("simulation/cae_imports/parsed_materials.json", json.dumps({"materials": [{"name": "Steel"}]}).encode())
+    project["aieng_file"] = "preproc-test.aieng"
+    save_project(settings, project)
+
+    resp = client.get(f"/api/projects/{project_id}/cae-preprocessing-summary")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["schema_version"] == "0.1"
+    assert data["summary_type"] == "cae_preprocessing"
+    assert data["status"]["has_materials"] is True
+    assert data["status"]["has_mesh"] is False
+
+
+def test_get_cae_simulation_run_summary_endpoint(tmp_path: Path) -> None:
+    """GET /api/projects/{id}/cae-simulation-run-summary returns simulation run summary."""
+    from app.main import Settings, create_app, default_project, project_dir, save_project
+    import zipfile
+
+    workspace = tmp_path / "workspace"
+    settings = Settings(
+        platform_root=tmp_path / "platform",
+        workspace_root=workspace,
+        data_root=tmp_path / "data",
+        aieng_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng"),
+        freecad_mcp_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng_freecad_mcp"),
+        freecad_home=workspace / "freecad",
+        sample_step=workspace / "sample.step",
+    )
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("runs-test"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "runs-test.aieng"
+    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+    run = json.dumps({
+        "run_id": "run_001",
+        "solver": "CalculiX",
+        "software": "FreeCAD FEM",
+        "status": {"state": "completed", "solved": True, "converged": True, "warnings": [], "errors": []},
+    })
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "test", "resources": {}}))
+        zf.writestr("simulation/runs/run_001/solver_run.json", run.encode())
+    project["aieng_file"] = "runs-test.aieng"
+    save_project(settings, project)
+
+    resp = client.get(f"/api/projects/{project_id}/cae-simulation-run-summary")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["schema_version"] == "0.1"
+    assert data["summary_type"] == "cae_simulation_run"
+    assert data["status"]["run_count"] == 1
+    assert data["status"]["latest_run_id"] == "run_001"
+
+
+def test_get_cae_preprocessing_summary_missing_package_returns_404(tmp_path: Path) -> None:
+    """GET /api/projects/{id}/cae-preprocessing-summary returns 404 when package missing."""
+    from app.main import Settings, create_app, default_project, save_project
+
+    workspace = tmp_path / "workspace"
+    settings = Settings(
+        platform_root=tmp_path / "platform",
+        workspace_root=workspace,
+        data_root=tmp_path / "data",
+        aieng_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng"),
+        freecad_mcp_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng_freecad_mcp"),
+        freecad_home=workspace / "freecad",
+        sample_step=workspace / "sample.step",
+    )
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("no-pkg"))
+    resp = client.get(f"/api/projects/{project['id']}/cae-preprocessing-summary")
+    assert resp.status_code == 404
+
+
+def test_get_cae_simulation_run_summary_missing_package_returns_404(tmp_path: Path) -> None:
+    """GET /api/projects/{id}/cae-simulation-run-summary returns 404 when package missing."""
+    from app.main import Settings, create_app, default_project, save_project
+
+    workspace = tmp_path / "workspace"
+    settings = Settings(
+        platform_root=tmp_path / "platform",
+        workspace_root=workspace,
+        data_root=tmp_path / "data",
+        aieng_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng"),
+        freecad_mcp_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng_freecad_mcp"),
+        freecad_home=workspace / "freecad",
+        sample_step=workspace / "sample.step",
+    )
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("no-pkg"))
+    resp = client.get(f"/api/projects/{project['id']}/cae-simulation-run-summary")
+    assert resp.status_code == 404
+
+
+# ---------------------------------------------------------------------------
+# Phase 18 — cae.apply_setup_patch runtime tool
+# ---------------------------------------------------------------------------
+
+def _make_patch_settings(tmp_path: Path):
+    from app.main import Settings
+    workspace = tmp_path / "workspace"
+    return Settings(
+        platform_root=tmp_path / "platform",
+        workspace_root=workspace,
+        data_root=tmp_path / "data",
+        aieng_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng"),
+        freecad_mcp_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng_freecad_mcp"),
+        freecad_home=workspace / "freecad",
+        sample_step=workspace / "sample.step",
+    )
+
+
+def _make_setup_package(pkg_path: Path, extra: dict | None = None) -> None:
+    """Create a minimal .aieng package suitable for setup-patch tests."""
+    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+    solver_settings = {"solver": "CalculiX", "n_cpus": 4, "time_limit_s": 3600}
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "patch-test", "resources": {}}))
+        zf.writestr("simulation/solver_settings.json", json.dumps(solver_settings))
+        zf.writestr(
+            "simulation/cae_imports/parsed_loads.json",
+            json.dumps({"loads": [{"id": "load_001", "kind": "force", "magnitude": 1000.0}]}),
+        )
+        if extra:
+            for name, content in extra.items():
+                zf.writestr(name, json.dumps(content) if isinstance(content, dict) else content)
+
+
+def test_cae_setup_patch_rejects_path_traversal(tmp_path: Path) -> None:
+    """cae.apply_setup_patch rejects paths containing '..'."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("patch-traversal"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "patch-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "patch-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "apply cae setup patch",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "patches": [{"path": "simulation/../secret.json", "action_type": "create_file", "content": {}}],
+        },
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "completed"
+    result = run["tool_results"][0]["output"]
+    assert result["status"] == "error"
+    assert result["code"] == "forbidden_path"
+
+
+def test_cae_setup_patch_rejects_absolute_path(tmp_path: Path) -> None:
+    """cae.apply_setup_patch rejects absolute paths."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("patch-abspath"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "patch-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "patch-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "apply cae setup patch",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "patches": [{"path": "/etc/passwd", "action_type": "create_file", "content": "x"}],
+        },
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "error"
+    assert result["code"] == "forbidden_path"
+
+
+def test_cae_setup_patch_rejects_results_write(tmp_path: Path) -> None:
+    """cae.apply_setup_patch rejects writes to results/ paths."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("patch-results"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "patch-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "patch-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "apply cae setup patch",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "patches": [{"path": "results/result_summary.json", "action_type": "create_file", "content": {}}],
+        },
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "error"
+    assert result["code"] == "forbidden_path"
+
+
+def test_cae_setup_patch_rejects_unsupported_operation(tmp_path: Path) -> None:
+    """cae.apply_setup_patch rejects unknown action_type values."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("patch-badop"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "patch-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "patch-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "apply cae setup patch",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "patches": [{
+                "path": "simulation/solver_settings.json",
+                "action_type": "delete_file",
+            }],
+        },
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "error"
+    assert result["code"] == "unsupported_operation"
+
+
+def test_cae_setup_patch_rejects_before_mismatch(tmp_path: Path) -> None:
+    """cae.apply_setup_patch rejects replace_json when 'before' does not match current value."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("patch-before"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "patch-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "patch-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "apply cae setup patch",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "patches": [{
+                "path": "simulation/solver_settings.json",
+                "action_type": "replace_json",
+                "pointer": "/n_cpus",
+                "before": 99,
+                "value": 8,
+            }],
+        },
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "error"
+    assert result["code"] == "patch_error"
+    assert "before mismatch" in result["message"]
+
+
+def test_cae_setup_patch_create_file_success(tmp_path: Path) -> None:
+    """cae.apply_setup_patch creates a new load-case file inside the package."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("patch-create"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "patch-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "patch-test.aieng"
+    save_project(settings, project)
+
+    new_load_case = {"id": "load_case_001", "name": "Static", "loads": []}
+    resp = client.post("/api/runtime/runs", json={
+        "message": "apply cae setup patch",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "patches": [{
+                "path": "simulation/load_cases/load_case_001.json",
+                "action_type": "create_file",
+                "content": new_load_case,
+            }],
+        },
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "completed"
+    result = run["tool_results"][0]["output"]
+    assert result["status"] == "ok"
+    changed = [a["path"] for a in result["changed_artifacts"]]
+    assert "simulation/load_cases/load_case_001.json" in changed
+
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        assert "simulation/load_cases/load_case_001.json" in zf.namelist()
+        written = json.loads(zf.read("simulation/load_cases/load_case_001.json"))
+        assert written["id"] == "load_case_001"
+
+
+def test_cae_setup_patch_replace_json_mutates_value(tmp_path: Path) -> None:
+    """cae.apply_setup_patch replace_json via pointer updates the target field."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("patch-replace"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "patch-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "patch-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "apply cae setup patch",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "patches": [{
+                "path": "simulation/solver_settings.json",
+                "action_type": "replace_json",
+                "pointer": "/n_cpus",
+                "before": 4,
+                "value": 8,
+            }],
+            "refresh_preprocessing_summary": False,
+        },
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "ok"
+    assert any(a["path"] == "simulation/solver_settings.json" for a in result["changed_artifacts"])
+
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        updated = json.loads(zf.read("simulation/solver_settings.json"))
+    assert updated["n_cpus"] == 8
+    assert updated["solver"] == "CalculiX"
+
+
+def test_cae_setup_patch_preserves_unrelated_entries(tmp_path: Path) -> None:
+    """cae.apply_setup_patch leaves unrelated package entries intact."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("patch-preserve"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "patch-test.aieng"
+    _make_setup_package(pkg_path, extra={"simulation/mesh/model.vtu": b"<vtu/>"})
+    project["aieng_file"] = "patch-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "apply cae setup patch",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "patches": [{
+                "path": "simulation/load_cases/lc_new.json",
+                "action_type": "create_file",
+                "content": {"id": "lc_new"},
+            }],
+            "refresh_preprocessing_summary": False,
+        },
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "ok"
+
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        names = set(zf.namelist())
+    assert "simulation/mesh/model.vtu" in names
+    assert "simulation/solver_settings.json" in names
+    assert "simulation/cae_imports/parsed_loads.json" in names
+    assert "simulation/load_cases/lc_new.json" in names
+
+
+def test_cae_setup_patch_no_duplicate_zip_entries(tmp_path: Path) -> None:
+    """cae.apply_setup_patch does not create duplicate ZIP entries when replacing."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("patch-nodup"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "patch-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "patch-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "apply cae setup patch",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "patches": [{
+                "path": "simulation/solver_settings.json",
+                "action_type": "replace_json",
+                "pointer": "/n_cpus",
+                "value": 2,
+            }],
+            "refresh_preprocessing_summary": False,
+        },
+    })
+    assert resp.status_code == 200
+    assert resp.json()["tool_results"][0]["output"]["status"] == "ok"
+
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        names = zf.namelist()
+    assert names.count("simulation/solver_settings.json") == 1
+    assert names.count("manifest.json") == 1
+
+
+def test_cae_setup_patch_returns_stale_artifacts_and_warnings(tmp_path: Path) -> None:
+    """cae.apply_setup_patch returns stale_artifacts and a warning when preprocessing refresh fails."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("patch-stale"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "patch-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "patch-test.aieng"
+    save_project(settings, project)
+
+    # Use refresh_preprocessing_summary=True (default) — refresh will fail since
+    # aieng package is not importable in test env, so all stale artifacts remain.
+    resp = client.post("/api/runtime/runs", json={
+        "message": "apply cae setup patch",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "patches": [{
+                "path": "simulation/solver_settings.json",
+                "action_type": "replace_json",
+                "pointer": "/n_cpus",
+                "value": 16,
+            }],
+        },
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "ok"
+    stale = result["stale_artifacts"]
+    assert isinstance(stale, list)
+    # At minimum the result summary and evidence index are stale
+    assert any("result_summary" in p for p in stale)
+    assert any("evidence_index" in p for p in stale)
+
+
+# ---------------------------------------------------------------------------
+# Phase 19 — cae.extract_solver_results runtime tool
+# ---------------------------------------------------------------------------
+
+def _frd_value(v: float) -> str:
+    return f"{v:12.5E}"
+
+
+def _frd_node_line(node_id: int, values: list) -> str:
+    return "    -1" + f"{node_id:12d}" + "".join(_frd_value(v) for v in values)
+
+
+def _make_test_frd(
+    disp_nodes: dict | None,
+    stress_nodes: dict | None,
+) -> str:
+    lines = ["    1C                                                                         1"]
+    if disp_nodes is not None:
+        lines += [
+            "    -4  DISP        4    1",
+            "    -5  D1          1    2    1    0",
+            "    -5  D2          1    2    2    0",
+            "    -5  D3          1    2    3    0",
+            "    -5  ALL         1    2    0    1",
+        ]
+        for nid, vals in disp_nodes.items():
+            lines.append(_frd_node_line(nid, vals))
+        lines.append("    -3")
+    if stress_nodes is not None:
+        lines += [
+            "    -4  S           6    1",
+            "    -5  SXX         1    4    1    1",
+            "    -5  SYY         1    4    2    1",
+            "    -5  SZZ         1    4    3    1",
+            "    -5  SXY         1    4    4    1",
+            "    -5  SXZ         1    4    5    1",
+            "    -5  SYZ         1    4    6    1",
+        ]
+        for nid, vals in stress_nodes.items():
+            lines.append(_frd_node_line(nid, vals))
+        lines.append("    -3")
+    lines.append(" 9999")
+    return "\n".join(lines) + "\n"
+
+
+def test_cae_extract_solver_results_success(tmp_path: Path) -> None:
+    """cae.extract_solver_results parses FRD and writes computed_metrics.json into package."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("frd-extract"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "extract-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "extract-test.aieng"
+    save_project(settings, project)
+
+    frd_path = tmp_path / "job.frd"
+    frd_path.write_text(
+        _make_test_frd(
+            {1: [1.0, 0.0, 0.0, 1.0], 2: [5.0, 0.0, 0.0, 5.0]},
+            {1: [200.0, 100.0, 50.0, 10.0, 0.0, 0.0]},
+        ),
+        encoding="utf-8",
+    )
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "extract solver results",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "frdPath": str(frd_path),
+            "loadCaseId": "load_case_001",
+            "refresh_result_summary": False,
+        },
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "completed"
+    result = run["tool_results"][0]["output"]
+    assert result["status"] == "ok"
+    assert any("computed_metrics" in a["path"] for a in result["artifacts"])
+
+    # Verify actual values were extracted
+    metrics = result["metrics"]
+    lc = metrics["load_cases"][0]
+    assert abs(lc["metrics"]["max_displacement"]["value"] - 5.0) < 1e-4
+    assert "max_von_mises_stress" in lc["metrics"]
+
+    # Verify package was updated
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        assert "results/computed_metrics.json" in zf.namelist()
+        written = json.loads(zf.read("results/computed_metrics.json"))
+    assert written["schema_version"] == "0.1"
+    assert abs(written["load_cases"][0]["metrics"]["max_displacement"]["value"] - 5.0) < 1e-4
+
+
+def test_cae_extract_solver_results_missing_frd_returns_error(tmp_path: Path) -> None:
+    """cae.extract_solver_results returns error when frdPath does not exist."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("frd-missing"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "extract-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "extract-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "extract solver results",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "frdPath": str(tmp_path / "nonexistent.frd"),
+        },
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "error"
+    assert result["code"] == "file_not_found"
+
+
+def test_cae_extract_solver_results_missing_frd_path_returns_error(tmp_path: Path) -> None:
+    """cae.extract_solver_results returns error when frdPath is not provided."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("frd-nopath"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "extract-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "extract-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "extract solver results",
+        "project_id": project_id,
+        "tool_input": {"project_id": project_id},
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "error"
+    assert result["code"] == "missing_frd_path"

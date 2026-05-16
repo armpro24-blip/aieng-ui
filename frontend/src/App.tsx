@@ -2025,9 +2025,58 @@ export default function App() {
                       </button>
                     </div>
                   </div>
+                  {caeSummary?.preprocessing_summary ? (
+                    <div className="summary-note" style={{ marginTop: 10 }}>
+                      <strong>Setup / Pre-processing</strong>
+                      <p>{caeSummary.preprocessing_summary.llm_summary.one_line}</p>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", marginTop: 6 }}>
+                        <small>Materials: {caeSummary.preprocessing_summary.status.has_materials ? "✓" : "✗"}</small>
+                        <small>Loads: {caeSummary.preprocessing_summary.status.has_loads ? "✓" : "✗"}</small>
+                        <small>Boundary conditions: {caeSummary.preprocessing_summary.status.has_boundary_conditions ? "✓" : "✗"}</small>
+                        <small>Mesh: {caeSummary.preprocessing_summary.status.has_mesh ? "✓" : "✗"}</small>
+                        <small>Solver settings: {caeSummary.preprocessing_summary.status.has_solver_settings ? "✓" : "✗"}</small>
+                        <small>Ready for solver: <strong>{caeSummary.preprocessing_summary.status.ready_for_solver ? "yes" : "no"}</strong></small>
+                      </div>
+                      {caeSummary.preprocessing_summary.status.missing_items.length > 0 ? (
+                        <div style={{ marginTop: 6 }}>
+                          <small><strong>Missing:</strong> {caeSummary.preprocessing_summary.status.missing_items.join(", ")}</small>
+                        </div>
+                      ) : null}
+                      <div style={{ marginTop: 6 }}>
+                        <small className="summary-muted">Setup readiness is artifact-based only. No solver execution.</small>
+                      </div>
+                    </div>
+                  ) : null}
+                  {caeSummary?.simulation_run_summary ? (
+                    <div className="summary-note" style={{ marginTop: 10 }}>
+                      <strong>Simulation Runs</strong>
+                      <p>{caeSummary.simulation_run_summary.llm_summary.one_line}</p>
+                      <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "4px 12px", marginTop: 6 }}>
+                        <small>Runs recorded: {caeSummary.simulation_run_summary.status.has_simulation_runs ? "yes" : "no"}</small>
+                        <small>Run count: {caeSummary.simulation_run_summary.status.run_count}</small>
+                        <small>Latest: {caeSummary.simulation_run_summary.status.latest_run_id ?? "none"}</small>
+                        <small>Completed: {caeSummary.simulation_run_summary.status.has_completed_run ? "yes" : "no"}</small>
+                        <small>Converged: {caeSummary.simulation_run_summary.status.has_converged_run ? "yes" : "no"}</small>
+                        <small>Failed: {caeSummary.simulation_run_summary.status.has_failed_run ? "yes" : "no"}</small>
+                      </div>
+                      {caeSummary.simulation_run_summary.runs.length > 0 ? (
+                        <div style={{ marginTop: 6 }}>
+                          <small><strong>Latest run:</strong> {caeSummary.simulation_run_summary.runs[0].solver} / {caeSummary.simulation_run_summary.runs[0].software} — {caeSummary.simulation_run_summary.runs[0].analysis_type} — {caeSummary.simulation_run_summary.runs[0].state}</small>
+                        </div>
+                      ) : null}
+                      {caeSummary.simulation_run_summary.status.warnings.length > 0 ? (
+                        <div style={{ marginTop: 6 }}>
+                          <small><strong>Warnings:</strong> {caeSummary.simulation_run_summary.status.warnings.length}</small>
+                        </div>
+                      ) : null}
+                      <div style={{ marginTop: 6 }}>
+                        <small className="summary-muted">Simulation run status is metadata-based only. Solver execution remains external.</small>
+                      </div>
+                    </div>
+                  ) : null}
                   {caeSummary?.result_summary ? (
                     <div className="summary-note" style={{ marginTop: 10 }}>
-                      <strong>Post-processing Summary</strong>
+                      <strong>Results / Post-processing</strong>
                       <p>{caeSummary.result_summary.llm_summary.one_line}</p>
                       {caeSummary.result_summary.source.solver !== "external_or_unknown" ? (
                         <small>Solver: {caeSummary.result_summary.source.solver}</small>

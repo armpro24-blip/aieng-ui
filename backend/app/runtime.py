@@ -326,6 +326,24 @@ _INTENT_MAP: list[tuple[list[str], str, str]] = [
         "postprocess.refresh_cae_summary",
         "Regenerate CAE result summary, evidence index, and markdown inside the .aieng package",
     ),
+    (
+        [
+            "apply cae setup patch", "cae setup patch", "patch cae setup",
+            "apply setup patch", "patch setup", "cae patch",
+            "应用cae设置补丁", "修改cae设置", "修改仿真设置",
+        ],
+        "cae.apply_setup_patch",
+        "Apply a controlled patch to CAE setup artifacts inside a .aieng package",
+    ),
+    (
+        [
+            "extract solver results", "parse frd", "extract frd", "import frd results",
+            "extract cae results", "parse solver output", "extract computed metrics from frd",
+            "提取求解器结果", "解析frd文件", "提取计算指标",
+        ],
+        "cae.extract_solver_results",
+        "Parse a CalculiX FRD result file and write computed_metrics.json into a .aieng package",
+    ),
 ]
 
 

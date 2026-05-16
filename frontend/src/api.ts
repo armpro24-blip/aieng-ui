@@ -1,4 +1,5 @@
 import type { AgentPlan, AgentRunResponse, BenchmarkRun, BenchmarkScenario, CaeArtifactDetection, CapabilityDescriptor, CapabilityPreview, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeEvent, RuntimeRun, RuntimeRunSummary, RuntimeToolInfo, SolverFieldDescriptor, WorkflowDefinition, WorkflowStep } from "./types";
+import type { AgentPlan, AgentRunResponse, BenchmarkRun, BenchmarkScenario, CaeArtifactDetection, CaePreprocessingSummary, CaeSimulationRunSummary, CapabilityDescriptor, CapabilityPreview, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeEvent, RuntimeRun, RuntimeRunSummary, RuntimeToolInfo, SolverFieldDescriptor, WorkflowDefinition, WorkflowStep } from "./types";
 
 const API = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 
@@ -131,4 +132,8 @@ export const api = {
   listTools: () => request<RuntimeToolInfo[]>("/api/runtime/tools"),
   getCaeArtifacts: (projectId: string) =>
     request<CaeArtifactDetection>(`/api/projects/${projectId}/cae-artifacts`),
+  getCaePreprocessingSummary: (projectId: string) =>
+    request<CaePreprocessingSummary>(`/api/projects/${projectId}/cae-preprocessing-summary`),
+  getCaeSimulationRunSummary: (projectId: string) =>
+    request<CaeSimulationRunSummary>(`/api/projects/${projectId}/cae-simulation-run-summary`),
 };

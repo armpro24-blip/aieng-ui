@@ -551,7 +551,7 @@ def _generate_cae_result_summary(settings: Settings, package_path: Path) -> dict
 
 
 def _generate_cae_preprocessing_summary(settings: Settings, package_path: Path) -> dict[str, Any] | None:
-    """Import aieng cae_preprocessing_summary and generate a read-only summary."""
+    """Import aieng cae_preprocessing_summary and generate a preprocessing summary for the package."""
     aieng_src = settings.aieng_root / "src"
     if not aieng_src.exists():
         return None
@@ -575,7 +575,7 @@ def _generate_cae_preprocessing_summary(settings: Settings, package_path: Path) 
 
 
 def _generate_cae_simulation_run_summary(settings: Settings, package_path: Path) -> dict[str, Any] | None:
-    """Import aieng cae_simulation_run_summary and generate a read-only summary."""
+    """Import aieng cae_simulation_run_summary and generate a simulation run summary for the package."""
     aieng_src = settings.aieng_root / "src"
     if not aieng_src.exists():
         return None
@@ -730,6 +730,218 @@ def write_artifact_to_package(
         "role": "artifact",
         "source_path": str(source),
     }
+
+
+# ---------------------------------------------------------------------------
+# cae.apply_setup_patch — constants and helpers
+# ---------------------------------------------------------------------------
+
+_ALLOWED_PATCH_PREFIXES = ("simulation/cae_imports/", "simulation/load_cases/")
+_ALLOWED_PATCH_EXACT = frozenset(
+    {"simulation/solver_settings.json", "simulation/cae_mapping.json", "graph/constraints.json"}
+)
+_SUPPORTED_PATCH_OPERATIONS = frozenset(
+    {"create_file", "replace_json", "merge_object", "append_array_item"}
+)
+# Artifacts that become stale whenever setup files are changed.
+_SETUP_STALE_ARTIFACTS = [
+    "simulation/preprocessing_summary.json",
+    "simulation/preprocessing_summary.md",
+    "results/result_summary.json",
+    "results/evidence_index.json",
+    "results/postprocessing_summary.md",
+]
+
+
+def _is_allowed_patch_path(p: str) -> bool:
+    if not p or p.startswith("/") or ".." in p.split("/"):
+        return False
+    if p in _ALLOWED_PATCH_EXACT:
+        return True
+    return any(p.startswith(prefix) for prefix in _ALLOWED_PATCH_PREFIXES)
+
+
+def _parse_json_pointer(pointer: str) -> list[str]:
+    """Decode a JSON Pointer (RFC 6901) into a list of path tokens."""
+    if pointer == "":
+        return []
+    if not pointer.startswith("/"):
+        raise ValueError(f"JSON Pointer must start with '/': {pointer!r}")
+    tokens = pointer[1:].split("/")
+    return [t.replace("~1", "/").replace("~0", "~") for t in tokens]
+
+
+def _json_pointer_get(obj: Any, tokens: list[str]) -> Any:
+    cur: Any = obj
+    for t in tokens:
+        if isinstance(cur, dict):
+            cur = cur[t]
+        elif isinstance(cur, list):
+            cur = cur[int(t)]
+        else:
+            raise KeyError(t)
+    return cur
+
+
+def _json_pointer_set(obj: Any, tokens: list[str], value: Any) -> None:
+    """Set a value at the JSON Pointer location (mutates obj in-place)."""
+    if not tokens:
+        raise ValueError("Cannot replace root document via pointer")
+    cur: Any = obj
+    for t in tokens[:-1]:
+        if isinstance(cur, dict):
+            cur = cur[t]
+        elif isinstance(cur, list):
+            cur = cur[int(t)]
+        else:
+            raise KeyError(t)
+    last = tokens[-1]
+    if isinstance(cur, dict):
+        cur[last] = value
+    elif isinstance(cur, list):
+        cur[int(last)] = value
+    else:
+        raise KeyError(last)
+
+
+def _apply_single_patch(
+    existing_content: bytes | None,
+    op: dict[str, Any],
+    path: str,
+) -> bytes:
+    """Apply one patch operation; returns new file bytes."""
+    action = op.get("action_type") or op.get("operation") or ""
+    patch_type = op.get("patch_type", "")
+
+    if action == "create_file":
+        content = op.get("content")
+        if content is None:
+            raise ValueError("create_file requires 'content'")
+        if isinstance(content, (dict, list)):
+            return (json.dumps(content, indent=2, sort_keys=True) + "\n").encode()
+        return str(content).encode()
+
+    if action in ("replace_json", "merge_object", "append_array_item"):
+        if existing_content is None:
+            raise ValueError(f"{action} requires an existing file at {path!r}")
+        try:
+            doc = json.loads(existing_content)
+        except json.JSONDecodeError as exc:
+            raise ValueError(f"existing file at {path!r} is not valid JSON: {exc}") from exc
+
+        pointer_str: str = op.get("pointer", "")
+        value: Any = op.get("value")
+
+        if action == "replace_json":
+            if pointer_str:
+                tokens = _parse_json_pointer(pointer_str)
+                before = op.get("before")
+                if before is not None:
+                    current = _json_pointer_get(doc, tokens)
+                    if current != before:
+                        raise ValueError(
+                            f"before mismatch at {pointer_str!r}: "
+                            f"expected {before!r}, got {current!r}"
+                        )
+                _json_pointer_set(doc, tokens, value)
+            else:
+                if not isinstance(value, dict):
+                    raise ValueError("replace_json without pointer requires value to be a dict")
+                before = op.get("before")
+                if before is not None and doc != before:
+                    raise ValueError("before mismatch: document does not match expected value")
+                doc = value
+        elif action == "merge_object":
+            if not isinstance(value, dict):
+                raise ValueError("merge_object requires value to be a dict")
+            if pointer_str:
+                tokens = _parse_json_pointer(pointer_str)
+                target = _json_pointer_get(doc, tokens)
+                if not isinstance(target, dict):
+                    raise ValueError(f"merge_object target at {pointer_str!r} is not an object")
+                target.update(value)
+            else:
+                if not isinstance(doc, dict):
+                    raise ValueError("merge_object without pointer requires document to be an object")
+                doc.update(value)
+        elif action == "append_array_item":
+            if pointer_str:
+                tokens = _parse_json_pointer(pointer_str)
+                target = _json_pointer_get(doc, tokens)
+                if not isinstance(target, list):
+                    raise ValueError(f"append_array_item target at {pointer_str!r} is not an array")
+                target.append(value)
+            else:
+                if not isinstance(doc, list):
+                    raise ValueError("append_array_item without pointer requires document to be an array")
+                doc.append(value)
+
+        return (json.dumps(doc, indent=2, sort_keys=True) + "\n").encode()
+
+    raise ValueError(f"unsupported action_type: {action!r}")
+
+
+def _apply_patches_to_package(
+    package_path: Path,
+    patches: list[dict[str, Any]],
+) -> tuple[list[str], list[str]]:
+    """
+    Apply all patches atomically to the package; returns (changed_paths, warning_msgs).
+    Reads the whole ZIP, applies patches in-memory, writes a new ZIP atomically.
+    """
+    with zipfile.ZipFile(package_path, mode="r") as zf:
+        existing_names = set(zf.namelist())
+        manifest_data = json.loads(zf.read("manifest.json")) if "manifest.json" in existing_names else {}
+        members: dict[str, bytes] = {}
+        for name in existing_names:
+            info = zf.getinfo(name)
+            if not info.is_dir():
+                members[name] = zf.read(name)
+
+    changed_paths: list[str] = []
+    warnings_out: list[str] = []
+
+    for patch in patches:
+        path: str = patch.get("path", "")
+        existing_bytes: bytes | None = members.get(path)
+        new_bytes = _apply_single_patch(existing_bytes, patch, path)
+        members[path] = new_bytes
+        changed_paths.append(path)
+
+    with tempfile.NamedTemporaryFile(
+        delete=False, suffix=".aieng", dir=package_path.parent
+    ) as tmp:
+        tmp_path = Path(tmp.name)
+
+    try:
+        manifest_json = (json.dumps(manifest_data, indent=2, sort_keys=True) + "\n").encode()
+        with zipfile.ZipFile(tmp_path, mode="w", compression=zipfile.ZIP_DEFLATED) as out_zf:
+            out_zf.writestr("manifest.json", manifest_json)
+            seen: set[str] = {"manifest.json"}
+            for name, data in members.items():
+                if name in seen or name == "manifest.json":
+                    continue
+                seen.add(name)
+                out_zf.writestr(name, data)
+        shutil.move(str(tmp_path), package_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+
+    return changed_paths, warnings_out
+
+
+def _compute_stale_artifacts(
+    changed_paths: list[str],
+    refreshed_paths: list[str],
+) -> list[str]:
+    """Return stale artifact paths: those in _SETUP_STALE_ARTIFACTS not yet refreshed."""
+    stale = []
+    refreshed_set = set(refreshed_paths)
+    for art in _SETUP_STALE_ARTIFACTS:
+        if art not in refreshed_set:
+            stale.append(art)
+    return stale
 
 
 def convert_stl_to_glb(stl_path: Path, glb_path: Path) -> dict[str, Any]:
@@ -1286,6 +1498,12 @@ def package_summary(settings: Settings, project_id: str) -> dict[str, Any]:
             _result_summary = _generate_cae_result_summary(settings, package_path)
             if _result_summary is not None:
                 _cae["result_summary"] = _result_summary
+            _preprocessing_summary = _generate_cae_preprocessing_summary(settings, package_path)
+            if _preprocessing_summary is not None:
+                _cae["preprocessing_summary"] = _preprocessing_summary
+            _simulation_run_summary = _generate_cae_simulation_run_summary(settings, package_path)
+            if _simulation_run_summary is not None:
+                _cae["simulation_run_summary"] = _simulation_run_summary
 
     return summary
 
@@ -1973,6 +2191,200 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             raise ValueError("patch_json is required for mcp.prepare_execution")
         return prepare_patch_execution(active_settings, pid, inp)
 
+    def _tool_cae_apply_setup_patch(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import aieng_bridge
+        from pathlib import Path as _Path
+
+        # Guard: reject claims_advanced requests
+        if inp.get("claims_advanced"):
+            return {
+                "status": "error",
+                "code": "unsupported_operation",
+                "message": "claims_advanced=true is not supported in this version.",
+            }
+
+        package_path: str | None = inp.get("packagePath") or inp.get("package_path")
+        project_id: str | None = inp.get("project_id")
+
+        if not package_path and project_id:
+            proj = get_project(active_settings, project_id)
+            pkg = resolve_project_path(active_settings, project_id, proj.get("aieng_file"))
+            if pkg is not None and pkg.exists():
+                package_path = str(pkg)
+
+        if not package_path:
+            return {
+                "status": "error",
+                "code": "missing_package_path",
+                "message": (
+                    "No package path provided and no project_id could be resolved. "
+                    "Pass packagePath or a project_id with an .aieng file."
+                ),
+            }
+
+        if not _Path(package_path).exists():
+            return {
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Package not found: {package_path}",
+            }
+
+        patches: list[dict[str, Any]] = inp.get("patches", [])
+        if not patches:
+            return {
+                "status": "error",
+                "code": "no_patches",
+                "message": "No patches provided.",
+            }
+
+        # Validate all patches before applying any
+        for i, patch in enumerate(patches):
+            path = patch.get("path", "")
+            action = patch.get("action_type") or patch.get("operation") or ""
+            if not _is_allowed_patch_path(path):
+                return {
+                    "status": "error",
+                    "code": "forbidden_path",
+                    "message": (
+                        f"Patch {i}: path {path!r} is not in the allowed patch locations. "
+                        "Only simulation/cae_imports/, simulation/load_cases/, "
+                        "simulation/solver_settings.json, simulation/cae_mapping.json, "
+                        "and graph/constraints.json are writable."
+                    ),
+                }
+            if action not in _SUPPORTED_PATCH_OPERATIONS:
+                return {
+                    "status": "error",
+                    "code": "unsupported_operation",
+                    "message": (
+                        f"Patch {i}: action_type {action!r} is not supported. "
+                        f"Supported: {sorted(_SUPPORTED_PATCH_OPERATIONS)}"
+                    ),
+                }
+
+        try:
+            changed_paths, apply_warnings = _apply_patches_to_package(
+                _Path(package_path), patches
+            )
+        except ValueError as exc:
+            return {"status": "error", "code": "patch_error", "message": str(exc)}
+        except Exception as exc:
+            return {"status": "error", "code": "patch_error", "message": f"Patch failed: {exc}"}
+
+        refreshed_artifacts: list[dict[str, Any]] = []
+        refresh_warnings: list[str] = []
+
+        do_refresh = bool(inp.get("refresh_preprocessing_summary", True))
+        if do_refresh:
+            try:
+                refresh_result = aieng_bridge.refresh_preprocessing_summary(
+                    package_path,
+                    aieng_root=active_settings.aieng_root,
+                    overwrite=True,
+                )
+                refreshed_artifacts.extend(refresh_result.get("artifacts", []))
+            except Exception as exc:
+                refresh_warnings.append(
+                    f"preprocessing_summary_refresh_failed: {exc}. "
+                    "Refresh manually via postprocess.refresh_cae_summary."
+                )
+
+        refreshed_paths = [a["path"] for a in refreshed_artifacts]
+        stale_artifacts = _compute_stale_artifacts(changed_paths, refreshed_paths)
+        all_warnings = apply_warnings + refresh_warnings
+
+        return {
+            "status": "ok",
+            "changed_artifacts": [
+                {"path": p, "kind": "cae_setup_patch", "role": "patched_setup_artifact"}
+                for p in changed_paths
+            ],
+            "refreshed_artifacts": refreshed_artifacts,
+            "stale_artifacts": stale_artifacts,
+            "warnings": all_warnings,
+        }
+
+    def _tool_cae_extract_solver_results(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import aieng_bridge
+        from pathlib import Path as _Path
+
+        package_path: str | None = inp.get("packagePath") or inp.get("package_path")
+        project_id: str | None = inp.get("project_id")
+        frd_path: str | None = inp.get("frdPath") or inp.get("frd_path")
+
+        if not package_path and project_id:
+            proj = get_project(active_settings, project_id)
+            pkg = resolve_project_path(active_settings, project_id, proj.get("aieng_file"))
+            if pkg is not None and pkg.exists():
+                package_path = str(pkg)
+
+        if not package_path:
+            return {
+                "status": "error",
+                "code": "missing_package_path",
+                "message": (
+                    "No package path provided and no project_id could be resolved. "
+                    "Pass packagePath or a project_id with an .aieng file."
+                ),
+            }
+
+        if not frd_path:
+            return {
+                "status": "error",
+                "code": "missing_frd_path",
+                "message": "No frdPath provided. Pass the path to the CalculiX .frd result file.",
+            }
+
+        if not _Path(package_path).exists():
+            return {
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Package not found: {package_path}",
+            }
+
+        if not _Path(frd_path).exists():
+            return {
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"FRD file not found: {frd_path}",
+            }
+
+        load_case_id: str = inp.get("loadCaseId") or inp.get("load_case_id") or "load_case_001"
+        software: str = inp.get("software") or "CalculiX"
+        overwrite: bool = bool(inp.get("overwrite", True))
+
+        try:
+            result = aieng_bridge.extract_frd_solver_results(
+                package_path,
+                frd_path,
+                aieng_root=active_settings.aieng_root,
+                load_case_id=load_case_id,
+                software=software,
+                overwrite=overwrite,
+            )
+        except Exception as exc:
+            return {"status": "error", "code": "extraction_error", "message": str(exc)}
+
+        # Optionally refresh the result summary so the UI reflects real numbers
+        refresh_warnings: list[str] = []
+        if inp.get("refresh_result_summary", True):
+            try:
+                aieng_bridge.refresh_cae_result_summary(
+                    package_path,
+                    aieng_root=active_settings.aieng_root,
+                    overwrite=True,
+                )
+            except Exception as exc:
+                refresh_warnings.append(
+                    f"result_summary_refresh_failed: {exc}. "
+                    "Refresh manually via postprocess.refresh_cae_summary."
+                )
+
+        if refresh_warnings:
+            result.setdefault("warnings", []).extend(refresh_warnings)
+
+        return result
+
     def _tool_freecad_run_macro(_inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
         # The execute_run() approval gate should prevent this from being called.
         # This body is a defensive belt-and-suspenders guard.
@@ -2034,6 +2446,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "mcp.prepare_execution",
         _tool_mcp_prepare_execution,
         description="Dry-run an .aieng patch proposal and return preflight side effects",
+    )
+    _rt.register_tool(
+        "cae.apply_setup_patch",
+        _tool_cae_apply_setup_patch,
+        description=(
+            "Apply a controlled patch to CAE setup artifacts inside a .aieng package. "
+            "Supports create_file, replace_json, merge_object, append_array_item. "
+            "Writes only to allowed setup paths; rejects results/ and path traversal."
+        ),
+    )
+    _rt.register_tool(
+        "cae.extract_solver_results",
+        _tool_cae_extract_solver_results,
+        description=(
+            "Parse a CalculiX FRD result file and write computed_metrics.json "
+            "(max displacement, max von Mises stress) into a .aieng package. "
+            "Extracts real numerical extrema from per-node field data."
+        ),
     )
     _rt.register_tool(
         "freecad.run_macro",

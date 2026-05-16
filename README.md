@@ -7,7 +7,7 @@ Web workbench and FastAPI service for the `.aieng` engineering platform.
 `aieng-ui` provides:
 
 - **FastAPI service layer** — project/file management, preview generation, semantic package inspection, CAE artifact detection (`GET /api/projects/{project_id}/cae-artifacts`)
-- **React SPA** — STEP upload, Three.js viewer (GLB/STL), semantic summary panel, honest CAE artifact status panel with one-click CAE summary refresh and external metrics import, chat/orchestration panel, audit log, settings drawer
+- **React SPA** — STEP upload, Three.js viewer (GLB/STL), semantic summary panel, honest CAE lifecycle panel (setup / simulation runs / results) with one-click refresh and external metrics import, chat/orchestration panel, audit log, settings drawer
 - **Local orchestration runtime** — `RunRecord`, `ToolCall`, `ToolResult`, `RuntimeEvent` types; intent-based plan builder; synchronous executor with approval gate
 - **CAD provider registry** — pluggable `CadProvider` interface; FreeCAD is the first implementation
 

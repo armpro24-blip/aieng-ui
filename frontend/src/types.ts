@@ -1,5 +1,64 @@
 ﻿export type CaeMode = "cad_only" | "cae_setup" | "cae_result" | "cae_validation";
 
+export type CaePreprocessingSummary = {
+  schema_version: string;
+  summary_type: string;
+  status: {
+    has_cae_setup: boolean;
+    has_materials: boolean;
+    has_loads: boolean;
+    has_boundary_conditions: boolean;
+    has_constraints: boolean;
+    has_mesh: boolean;
+    has_load_cases: boolean;
+    has_solver_settings: boolean;
+    has_cae_mapping: boolean;
+    ready_for_solver: boolean;
+    missing_items: string[];
+    warnings: string[];
+  };
+  llm_summary: {
+    one_line: string;
+    key_findings: string[];
+    risks: string[];
+    recommended_next_actions: string[];
+    limitations: string[];
+  };
+};
+
+export type CaeSimulationRunSummary = {
+  schema_version: string;
+  summary_type: string;
+  status: {
+    has_simulation_runs: boolean;
+    run_count: number;
+    latest_run_id: string | null;
+    has_completed_run: boolean;
+    has_converged_run: boolean;
+    has_failed_run: boolean;
+    warnings: string[];
+  };
+  runs: Array<{
+    run_id: string;
+    solver: string;
+    software: string;
+    analysis_type: string;
+    state: string;
+    solved: boolean | null;
+    converged: boolean | null;
+    warnings: string[];
+    errors: string[];
+    log_file: string | null;
+  }>;
+  llm_summary: {
+    one_line: string;
+    key_findings: string[];
+    risks: string[];
+    recommended_next_actions: string[];
+    limitations: string[];
+  };
+};
+
 export type CaeArtifactDetection = {
   mode: CaeMode;
   artifacts: Record<string, boolean>;
@@ -106,6 +165,63 @@ export type ProjectSummary = {
       available: boolean;
     }> | null;
     artifact_detection?: CaeArtifactDetection | null;
+    preprocessing_summary?: {
+      schema_version: string;
+      summary_type: string;
+      status: {
+        has_cae_setup: boolean;
+        has_materials: boolean;
+        has_loads: boolean;
+        has_boundary_conditions: boolean;
+        has_constraints: boolean;
+        has_mesh: boolean;
+        has_load_cases: boolean;
+        has_solver_settings: boolean;
+        has_cae_mapping: boolean;
+        ready_for_solver: boolean;
+        missing_items: string[];
+        warnings: string[];
+      };
+      llm_summary: {
+        one_line: string;
+        key_findings: string[];
+        risks: string[];
+        recommended_next_actions: string[];
+        limitations: string[];
+      };
+    } | null;
+    simulation_run_summary?: {
+      schema_version: string;
+      summary_type: string;
+      status: {
+        has_simulation_runs: boolean;
+        run_count: number;
+        latest_run_id: string | null;
+        has_completed_run: boolean;
+        has_converged_run: boolean;
+        has_failed_run: boolean;
+        warnings: string[];
+      };
+      runs: Array<{
+        run_id: string;
+        solver: string;
+        software: string;
+        analysis_type: string;
+        state: string;
+        solved: boolean | null;
+        converged: boolean | null;
+        warnings: string[];
+        errors: string[];
+        log_file: string | null;
+      }>;
+      llm_summary: {
+        one_line: string;
+        key_findings: string[];
+        risks: string[];
+        recommended_next_actions: string[];
+        limitations: string[];
+      };
+    } | null;
     result_summary?: {
       schema_version: string;
       summary_type: string;
