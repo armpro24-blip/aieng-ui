@@ -11,7 +11,8 @@ Web workbench and FastAPI service for the `.aieng` engineering platform.
 - **Local orchestration runtime** — `RunRecord`, `ToolCall`, `ToolResult`, `RuntimeEvent` types; intent-based plan builder; synchronous executor with approval gate
 - **CAD provider registry** — pluggable `CadProvider` interface; FreeCAD is the first implementation
 
-Thirteen registered runtime tools (11 working + 2 skeleton):
+Sixteen registered runtime tools (15 working + 1 skeleton; `cae.run_solver`
+and `freecad.run_macro` are approval-gated):
 
 | Tool | Status |
 |------|--------|
@@ -23,6 +24,9 @@ Thirteen registered runtime tools (11 working + 2 skeleton):
 | `freecad.export_step` | Working — FreeCADCmd bridge; writes `{stem}_export.step` |
 | `postprocess.generate_computed_metrics` | Working — normalizes external metrics into `computed_metrics.json` and writes it back into the `.aieng` package |
 | `postprocess.refresh_cae_summary` | Working — regenerates CAE result summary, evidence index, and markdown |
+| `mcp.check` | Working — checks MCP guardrails, capability gaps, operation policy |
+| `mcp.parse_patch` | Working — parses an `.aieng` patch proposal without executing |
+| `mcp.prepare_execution` | Working — dry-run `.aieng` patch proposal; returns preflight side effects |
 | `cae.apply_setup_patch` | Working — controlled patches to CAE setup artifacts |
 | `cae.extract_solver_results` | Working — parses CalculiX FRD and writes `computed_metrics.json` |
 | `cae.prepare_solver_run` | Working — preflight inspection, no solver execution |

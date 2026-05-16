@@ -3220,3 +3220,79 @@ def test_bridge_check_schema_version_missing_returns_regenerate_warning() -> Non
     assert len(warnings) == 1
     assert "regenerate" in warnings[0].lower()
     assert "missing" in warnings[0].lower()
+
+
+# ---------------------------------------------------------------------------
+# Runtime CAE tool contract
+# ---------------------------------------------------------------------------
+# Critical runtime tools that agent-facing surfaces (MCP wrappers, capability
+# registry, agent vertical workflow) depend on. Adding a tool here means it
+# must survive any future runtime-registry refactor.
+#
+# Subset membership only — we do not assert an exact total, since non-critical
+# tools (aieng.*, mcp.*) are free to change without breaking this contract.
+
+CRITICAL_RUNTIME_TOOLS: tuple[str, ...] = (
+    "freecad.inspect_geometry",
+    "freecad.export_step",
+    "postprocess.generate_computed_metrics",
+    "postprocess.refresh_cae_summary",
+    "cae.apply_setup_patch",
+    "cae.extract_solver_results",
+    "cae.prepare_solver_run",
+    "cae.run_solver",
+)
+
+
+def test_runtime_introspection_includes_critical_cae_tools(tmp_path: Path) -> None:
+    """Every critical CAE/postprocess runtime tool must appear in
+    /api/runtime/tools introspection with a non-empty description."""
+    settings = _make_runtime_settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    resp = client.get("/api/runtime/tools")
+    assert resp.status_code == 200
+    tools_by_name = {t["name"]: t for t in resp.json()}
+
+    missing = [name for name in CRITICAL_RUNTIME_TOOLS if name not in tools_by_name]
+    assert not missing, (
+        f"Critical runtime tools missing from introspection: {missing}. "
+        f"Either register them in app.main.create_app or remove them from "
+        f"CRITICAL_RUNTIME_TOOLS if intentionally deprecated."
+    )
+
+    for name in CRITICAL_RUNTIME_TOOLS:
+        entry = tools_by_name[name]
+        assert isinstance(entry["description"], str) and entry["description"], (
+            f"{name} is registered but has no description"
+        )
+        assert "requires_approval" in entry
+
+
+def test_run_solver_introspection_requires_approval(tmp_path: Path) -> None:
+    """cae.run_solver is potentially destructive; the approval gate must
+    survive any future refactor of the registry."""
+    settings = _make_runtime_settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    resp = client.get("/api/runtime/tools")
+    assert resp.status_code == 200
+    run_solver = next(t for t in resp.json() if t["name"] == "cae.run_solver")
+    assert run_solver["requires_approval"] is True
+
+
+def test_capability_registry_includes_critical_runtime_tools(tmp_path: Path) -> None:
+    """The capability registry (agent_workbench.list_capabilities) re-exports
+    every runtime tool. Critical CAE tools must therefore be visible to the
+    agent capability surface, not only to the raw /api/runtime/tools endpoint."""
+    from app.agent_workbench import list_capabilities
+
+    settings = _make_runtime_settings(tmp_path)
+    # Trigger app construction so register_tool calls execute.
+    create_app(settings)
+
+    caps_by_name = {c["name"]: c for c in list_capabilities(settings)}
+    missing = [name for name in CRITICAL_RUNTIME_TOOLS if name not in caps_by_name]
+    assert not missing, (
+        f"Critical runtime tools missing from capability registry: {missing}"
+    )
