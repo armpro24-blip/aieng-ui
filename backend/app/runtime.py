@@ -364,6 +364,24 @@ _INTENT_MAP: list[tuple[list[str], str, str]] = [
         "cae.run_solver",
         "Execute an external CalculiX solver run on an existing input deck (requires approval)",
     ),
+    (
+        [
+            "write mesh handoff", "mesh handoff", "generate mesh handoff",
+            "create mesh handoff", "mesh handoff contract",
+            "生成网格交接", "网格交接",
+        ],
+        "cae.write_mesh_handoff",
+        "Write a mesh handoff contract into a .aieng package for external Gmsh execution",
+    ),
+    (
+        [
+            "import solver evidence", "import solver result", "import solver output",
+            "import result evidence", "solver evidence import",
+            "导入求解器证据", "导入求解器结果",
+        ],
+        "cae.import_solver_evidence",
+        "Import an external solver result file as evidence into a .aieng package",
+    ),
 ]
 
 

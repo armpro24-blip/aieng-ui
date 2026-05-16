@@ -5,6 +5,7 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import yaml
 from fastapi.testclient import TestClient
 
 from app.main import (
@@ -2653,6 +2654,188 @@ def test_cae_extract_solver_results_missing_frd_path_returns_error(tmp_path: Pat
     result = resp.json()["tool_results"][0]["output"]
     assert result["status"] == "error"
     assert result["code"] == "missing_frd_path"
+
+
+# ---------------------------------------------------------------------------
+# cae.write_mesh_handoff
+# ---------------------------------------------------------------------------
+
+def _make_package_with_topology(pkg_path: Path) -> None:
+    """Create a minimal .aieng package with topology_map.json for handoff tests."""
+    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+    topology = {
+        "format_version": "0.1",
+        "entities": [
+            {"id": "body_001", "type": "solid"},
+            {"id": "face_001", "type": "face"},
+            {"id": "edge_001", "type": "edge"},
+        ],
+    }
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "handoff-test", "resources": {}}))
+        zf.writestr("geometry/topology_map.json", json.dumps(topology))
+        zf.writestr("simulation/setup.yaml", yaml.safe_dump({"mesh": {"element_size": 2.5}}))
+
+
+def test_cae_write_mesh_handoff_success(tmp_path: Path) -> None:
+    """cae.write_mesh_handoff writes mesh_handoff_contract.json into package."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("handoff"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "handoff-test.aieng"
+    _make_package_with_topology(pkg_path)
+    project["aieng_file"] = "handoff-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "write mesh handoff",
+        "project_id": project_id,
+        "tool_input": {"project_id": project_id, "handoff_id": "handoff_001"},
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "completed"
+    result = run["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert result["handoff_id"] == "handoff_001"
+    assert any(a["path"] == "simulation/mesh_handoff_contract.json" for a in result["artifacts"])
+
+    # Verify package was updated
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        assert "simulation/mesh_handoff_contract.json" in zf.namelist()
+        contract = json.loads(zf.read("simulation/mesh_handoff_contract.json"))
+    assert contract["handoff_id"] == "handoff_001"
+    assert contract["mesher_target"] == "gmsh"
+    assert "topology_refs" in contract
+
+
+def test_cae_write_mesh_handoff_missing_topology_returns_error(tmp_path: Path) -> None:
+    """cae.write_mesh_handoff returns error when topology_map.json is missing."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("handoff-no-topo"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "handoff-no-topo.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "handoff-no-topo.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "write mesh handoff",
+        "project_id": project_id,
+        "tool_input": {"project_id": project_id},
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["ok"] is False
+    assert result["code"] == "topology_missing"
+
+
+# ---------------------------------------------------------------------------
+# cae.import_solver_evidence
+# ---------------------------------------------------------------------------
+
+def _make_package_with_evidence_scaffold(pkg_path: Path) -> None:
+    """Create a minimal .aieng package with evidence scaffold for solver evidence tests."""
+    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+    evidence_index = {
+        "format_version": "0.1",
+        "evidence_items": [],
+    }
+    claim_map = {
+        "format_version": "0.1",
+        "claims": [
+            {"claim_id": "claim_solver_result_001", "claim_type": "solver/result_available", "verification_status": "unsupported"}
+        ],
+    }
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "ev-test", "resources": {}}))
+        zf.writestr("simulation/solver_settings.json", json.dumps({"solver": "CalculiX", "n_cpus": 4}))
+        zf.writestr("results/evidence_index.json", json.dumps(evidence_index))
+        zf.writestr("results/claim_map.json", json.dumps(claim_map))
+
+
+def test_cae_import_solver_evidence_success(tmp_path: Path) -> None:
+    """cae.import_solver_evidence imports solver result as evidence into package."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("solver-ev"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "solver-ev.aieng"
+    _make_package_with_evidence_scaffold(pkg_path)
+    project["aieng_file"] = "solver-ev.aieng"
+    save_project(settings, project)
+
+    result_file = tmp_path / "job.dat"
+    result_file.write_text(
+        "max von Mises stress = 250.0 MPa\n"
+        "maximum displacement = 1.23 mm\n",
+        encoding="utf-8",
+    )
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "import solver evidence",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "result_file": str(result_file),
+            "result_format": "calculix_dat",
+            "producer_tool": "calculix",
+        },
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "completed"
+    result = run["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert result["status"] == "completed"
+    assert any(a["path"] == "results/evidence_index.json" for a in result["artifacts"])
+
+
+def test_cae_import_solver_evidence_missing_result_file_returns_error(tmp_path: Path) -> None:
+    """cae.import_solver_evidence returns error when result_file does not exist."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("solver-ev-missing"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "solver-ev-missing.aieng"
+    _make_package_with_evidence_scaffold(pkg_path)
+    project["aieng_file"] = "solver-ev-missing.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "import solver evidence",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "result_file": str(tmp_path / "nonexistent.dat"),
+        },
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["ok"] is False
+    assert result["code"] == "result_file_not_found"
 
 
 # ---------------------------------------------------------------------------

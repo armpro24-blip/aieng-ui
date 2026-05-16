@@ -244,3 +244,148 @@ def extract_frd_solver_results(
                 sys.path.remove(candidate)
             except ValueError:
                 pass
+
+
+def write_mesh_handoff(
+    package_path: str | Path,
+    *,
+    aieng_root: str | Path,
+    overwrite: bool = False,
+    handoff_id: str = "mesh_handoff_001",
+) -> dict[str, Any]:
+    """Write a mesh handoff contract into a .aieng package.
+
+    Imports ``aieng.simulation.mesh_handoff_writer.write_mesh_handoff_package``
+    from ``aieng_root/src``. Raises RuntimeError if the import or write fails.
+
+    Args:
+        package_path: Path to the .aieng package.
+        aieng_root: Root of the aieng repo checkout.
+        overwrite: Whether to overwrite an existing mesh handoff contract.
+        handoff_id: Identifier for this handoff contract.
+
+    Returns:
+        Dict with status, package_path, and the handoff contract artifact.
+    """
+    pkg = Path(package_path)
+    if not pkg.exists():
+        raise FileNotFoundError(f"Package not found: {pkg}")
+
+    aieng_src = Path(aieng_root) / "src"
+    if not aieng_src.exists():
+        raise RuntimeError(f"aieng src not found at {aieng_src}")
+
+    injected = False
+    try:
+        candidate = str(aieng_src)
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            injected = True
+        from aieng.simulation.mesh_handoff_writer import write_mesh_handoff_package  # type: ignore[import]
+
+        result_path = write_mesh_handoff_package(
+            pkg,
+            overwrite=overwrite,
+            handoff_id=handoff_id,
+        )
+        return {
+            "status": "ok",
+            "package_path": str(result_path),
+            "artifacts": [
+                {
+                    "path": "simulation/mesh_handoff_contract.json",
+                    "kind": "mesh_handoff_contract",
+                    "role": "external_mesher_handoff_spec",
+                }
+            ],
+        }
+    except (FileNotFoundError, ValueError):
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to write mesh handoff contract: {exc}") from exc
+    finally:
+        if injected:
+            try:
+                sys.path.remove(candidate)
+            except ValueError:
+                pass
+
+
+def import_solver_evidence(
+    package_path: str | Path,
+    result_file: str | Path,
+    *,
+    aieng_root: str | Path,
+    result_format: str = "calculix_dat",
+    producer_tool: str = "calculix",
+    claim_support: list[str] | None = None,
+    verification_status: str = "unverified",
+    evidence_id: str | None = None,
+) -> dict[str, Any]:
+    """Import external solver result evidence into a .aieng package.
+
+    Imports ``aieng.simulation.solver_evidence_importer.import_solver_evidence_package``
+    from ``aieng_root/src``. Raises RuntimeError if the import or write fails.
+
+    Args:
+        package_path: Path to the .aieng package.
+        result_file: Path to the solver result file.
+        aieng_root: Root of the aieng repo checkout.
+        result_format: Format of the result file (e.g. "calculix_dat").
+        producer_tool: Name of the solver tool that produced the result.
+        claim_support: List of claim IDs this evidence supports.
+        verification_status: Verification status for the evidence.
+        evidence_id: Optional explicit evidence ID.
+
+    Returns:
+        Dict with status, package_path, evidence_id, and summary.
+    """
+    pkg = Path(package_path)
+    result = Path(result_file)
+    if not pkg.exists():
+        raise FileNotFoundError(f"Package not found: {pkg}")
+    if not result.exists():
+        raise FileNotFoundError(f"Result file not found: {result}")
+
+    aieng_src = Path(aieng_root) / "src"
+    if not aieng_src.exists():
+        raise RuntimeError(f"aieng src not found at {aieng_src}")
+
+    injected = False
+    try:
+        candidate = str(aieng_src)
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            injected = True
+        from aieng.simulation.solver_evidence_importer import import_solver_evidence_package  # type: ignore[import]
+
+        out_path, summary = import_solver_evidence_package(
+            pkg,
+            result_file=result,
+            result_format=result_format,
+            producer_tool=producer_tool,
+            claim_support=claim_support or ["claim_solver_result_001"],
+            verification_status=verification_status,
+            evidence_id=evidence_id,
+        )
+        return {
+            "status": "ok",
+            "package_path": str(out_path),
+            "evidence_id": summary.get("evidence_id", evidence_id),
+            "summary": summary,
+            "artifacts": [
+                {
+                    "path": "results/evidence_index.json",
+                    "kind": "evidence_index",
+                    "role": "solver_evidence_catalog",
+                }
+            ],
+        }
+    except Exception as exc:
+        raise RuntimeError(f"Failed to import solver evidence: {exc}") from exc
+    finally:
+        if injected:
+            try:
+                sys.path.remove(candidate)
+            except ValueError:
+                pass

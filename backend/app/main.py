@@ -3252,6 +3252,168 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             except Exception:
                 pass
 
+    def _tool_cae_write_mesh_handoff(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import aieng_bridge
+        from pathlib import Path as _Path
+
+        package_path_str: str | None = inp.get("packagePath") or inp.get("package_path")
+        project_id: str | None = inp.get("project_id")
+        overwrite: bool = bool(inp.get("overwrite", False))
+        handoff_id: str = inp.get("handoffId") or inp.get("handoff_id") or "mesh_handoff_001"
+
+        if not package_path_str and project_id:
+            proj = get_project(active_settings, project_id)
+            pkg = resolve_project_path(active_settings, project_id, proj.get("aieng_file"))
+            if pkg is not None and pkg.exists():
+                package_path_str = str(pkg)
+
+        if not package_path_str:
+            return {
+                "ok": False,
+                "tool": "cae.write_mesh_handoff",
+                "status": "error",
+                "code": "missing_package_path",
+                "message": "No package path provided and no project_id could be resolved.",
+            }
+
+        package_path = _Path(package_path_str)
+        if not package_path.exists():
+            return {
+                "ok": False,
+                "tool": "cae.write_mesh_handoff",
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Package not found: {package_path_str}",
+            }
+
+        try:
+            result = aieng_bridge.write_mesh_handoff(
+                package_path,
+                aieng_root=active_settings.aieng_root,
+                overwrite=overwrite,
+                handoff_id=handoff_id,
+            )
+        except FileNotFoundError as exc:
+            return {
+                "ok": False,
+                "tool": "cae.write_mesh_handoff",
+                "status": "error",
+                "code": "topology_missing",
+                "message": str(exc),
+            }
+        except RuntimeError as exc:
+            return {
+                "ok": False,
+                "tool": "cae.write_mesh_handoff",
+                "status": "error",
+                "code": "handoff_write_failed",
+                "message": str(exc),
+            }
+
+        return {
+            "ok": True,
+            "tool": "cae.write_mesh_handoff",
+            "status": "completed",
+            "package_path": str(package_path),
+            "handoff_id": handoff_id,
+            "artifacts": result.get("artifacts", []),
+        }
+
+    def _tool_cae_import_solver_evidence(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import aieng_bridge
+        from pathlib import Path as _Path
+
+        package_path_str: str | None = inp.get("packagePath") or inp.get("package_path")
+        project_id: str | None = inp.get("project_id")
+        result_file: str | None = inp.get("resultFile") or inp.get("result_file")
+        result_format: str = inp.get("resultFormat") or inp.get("result_format") or "calculix_dat"
+        producer_tool: str = inp.get("producerTool") or inp.get("producer_tool") or "calculix"
+        claim_support: list[str] = inp.get("claimSupport") or inp.get("claim_support") or ["claim_solver_result_001"]
+        verification_status: str = inp.get("verificationStatus") or inp.get("verification_status") or "unverified"
+        evidence_id: str | None = inp.get("evidenceId") or inp.get("evidence_id")
+
+        if not package_path_str and project_id:
+            proj = get_project(active_settings, project_id)
+            pkg = resolve_project_path(active_settings, project_id, proj.get("aieng_file"))
+            if pkg is not None and pkg.exists():
+                package_path_str = str(pkg)
+
+        if not package_path_str:
+            return {
+                "ok": False,
+                "tool": "cae.import_solver_evidence",
+                "status": "error",
+                "code": "missing_package_path",
+                "message": "No package path provided and no project_id could be resolved.",
+            }
+
+        package_path = _Path(package_path_str)
+        if not package_path.exists():
+            return {
+                "ok": False,
+                "tool": "cae.import_solver_evidence",
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Package not found: {package_path_str}",
+            }
+
+        if not result_file:
+            return {
+                "ok": False,
+                "tool": "cae.import_solver_evidence",
+                "status": "error",
+                "code": "missing_result_file",
+                "message": "No result file provided. Pass resultFile.",
+            }
+
+        result_path = _Path(result_file)
+        if not result_path.exists():
+            return {
+                "ok": False,
+                "tool": "cae.import_solver_evidence",
+                "status": "error",
+                "code": "result_file_not_found",
+                "message": f"Result file not found: {result_file}",
+            }
+
+        try:
+            result = aieng_bridge.import_solver_evidence(
+                package_path,
+                result_path,
+                aieng_root=active_settings.aieng_root,
+                result_format=result_format,
+                producer_tool=producer_tool,
+                claim_support=claim_support,
+                verification_status=verification_status,
+                evidence_id=evidence_id,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            return {
+                "ok": False,
+                "tool": "cae.import_solver_evidence",
+                "status": "error",
+                "code": "import_validation_failed",
+                "message": str(exc),
+            }
+        except RuntimeError as exc:
+            return {
+                "ok": False,
+                "tool": "cae.import_solver_evidence",
+                "status": "error",
+                "code": "import_failed",
+                "message": str(exc),
+            }
+
+        return {
+            "ok": True,
+            "tool": "cae.import_solver_evidence",
+            "status": "completed",
+            "package_path": str(package_path),
+            "evidence_id": result.get("evidence_id"),
+            "artifacts": result.get("artifacts", []),
+            "summary": result.get("summary", {}),
+        }
+
     def _tool_freecad_run_macro(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
         from . import freecad_bridge
         from pathlib import Path as _Path
@@ -3395,6 +3557,24 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "captures stdout/stderr, and writes solver_run.json, solver_log.txt, "
             "and result.frd back into the .aieng package. "
             "Requires explicit approval before execution."
+        ),
+    )
+    _rt.register_tool(
+        "cae.write_mesh_handoff",
+        _tool_cae_write_mesh_handoff,
+        description=(
+            "Write a mesh handoff contract (simulation/mesh_handoff_contract.json) into a .aieng package. "
+            "Reads topology_map.json and simulation/setup.yaml to produce a structured handoff spec "
+            "for external Gmsh execution. Does not run a mesher."
+        ),
+    )
+    _rt.register_tool(
+        "cae.import_solver_evidence",
+        _tool_cae_import_solver_evidence,
+        description=(
+            "Import an external solver result file as evidence into a .aieng package. "
+            "Scans the result file for known numeric observations (max von Mises, max displacement, etc.) "
+            "and appends them to results/evidence_index.json. Does not auto-advance claim status."
         ),
     )
     _rt.register_tool(
