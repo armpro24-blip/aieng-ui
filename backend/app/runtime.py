@@ -344,6 +344,16 @@ _INTENT_MAP: list[tuple[list[str], str, str]] = [
         "cae.extract_solver_results",
         "Parse a CalculiX FRD result file and write computed_metrics.json into a .aieng package",
     ),
+    (
+        [
+            "prepare solver run", "solver preflight", "run preflight", "check solver readiness",
+            "prepare cae run", "cae run preflight", "check simulation readiness",
+            "prepare simulation run", "simulation preflight",
+            "准备求解器运行", "求解器预检", "仿真准备", "求解器运行预检",
+        ],
+        "cae.prepare_solver_run",
+        "Inspect .aieng package and return solver run preflight plan (no solver execution)",
+    ),
 ]
 
 

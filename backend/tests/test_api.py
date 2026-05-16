@@ -2396,3 +2396,211 @@ def test_cae_extract_solver_results_missing_frd_path_returns_error(tmp_path: Pat
     result = resp.json()["tool_results"][0]["output"]
     assert result["status"] == "error"
     assert result["code"] == "missing_frd_path"
+
+
+# ---------------------------------------------------------------------------
+# cae.prepare_solver_run (Phase 20B)
+# ---------------------------------------------------------------------------
+
+def _make_preflight_package(pkg_path: Path, *, mesh: bool = True, solver_settings: bool = True,
+                             load_case: bool = True, input_deck: bool = False,
+                             load_case_id: str = "load_case_001", run_id: str = "run_001") -> None:
+    """Create a .aieng package for preflight tests with selectable artifact presence."""
+    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "preflight-test", "resources": {}}))
+        if mesh:
+            zf.writestr("simulation/mesh/mesh_metadata.json", json.dumps({"elements": 4000, "nodes": 800}))
+        if solver_settings:
+            zf.writestr("simulation/solver_settings.json", json.dumps({"solver": "CalculiX", "n_cpus": 4}))
+        if load_case:
+            zf.writestr(
+                f"simulation/load_cases/{load_case_id}.json",
+                json.dumps({"id": load_case_id, "loads": []}),
+            )
+        if input_deck:
+            zf.writestr(
+                f"simulation/runs/{run_id}/solver_input.inp",
+                "** CalculiX input deck placeholder\n",
+            )
+
+
+def test_prepare_solver_run_reports_missing_artifacts(tmp_path: Path) -> None:
+    """cae.prepare_solver_run honestly reports missing mesh, settings, load case, and input deck."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("preflight-missing"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "preflight.aieng"
+    # Package with nothing — no mesh, no solver settings, no load case, no input deck
+    _make_preflight_package(pkg_path, mesh=False, solver_settings=False, load_case=False, input_deck=False)
+    project["aieng_file"] = "preflight.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "prepare solver run",
+        "project_id": project_id,
+        "tool_input": {"project_id": project_id},
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "completed"
+    result = run["tool_results"][0]["output"]
+
+    assert result["ok"] is True
+    assert result["ready_to_run"] is False
+    preflight = result["preflight"]
+    assert preflight["has_mesh"] is False
+    assert preflight["has_solver_settings"] is False
+    assert preflight["has_load_case"] is False
+    assert preflight["has_input_deck"] is False
+    assert len(preflight["missing_items"]) >= 4
+
+
+def test_prepare_solver_run_ready_to_run_false_when_ccx_unavailable(tmp_path: Path) -> None:
+    """cae.prepare_solver_run returns ready_to_run=false when ccx is not on PATH."""
+    from unittest.mock import patch
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("preflight-noccx"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "preflight.aieng"
+    # Package with all artifacts present except ccx
+    _make_preflight_package(pkg_path, mesh=True, solver_settings=True, load_case=True, input_deck=True)
+    project["aieng_file"] = "preflight.aieng"
+    save_project(settings, project)
+
+    # Patch shutil.which to simulate ccx not found
+    with patch("app.main.shutil.which", return_value=None):
+        resp = client.post("/api/runtime/runs", json={
+            "message": "prepare solver run",
+            "project_id": project_id,
+            "tool_input": {"project_id": project_id},
+        })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert result["ready_to_run"] is False
+    assert result["preflight"]["ccx_available"] is False
+    assert any("ccx" in item.lower() for item in result["preflight"]["missing_items"])
+
+
+def test_prepare_solver_run_planned_artifacts_include_frd_and_summaries(tmp_path: Path) -> None:
+    """planned_artifacts include FRD, computed_metrics, and result summaries when requested."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("preflight-artifacts"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "preflight.aieng"
+    _make_preflight_package(pkg_path)
+    project["aieng_file"] = "preflight.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "prepare solver run",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "run_id": "run_001",
+            "extract_results": True,
+            "refresh_summary": True,
+        },
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["ok"] is True
+
+    paths = [a["path"] for a in result["planned_artifacts"]]
+    assert any("result.frd" in p for p in paths)
+    assert any("computed_metrics.json" in p for p in paths)
+    assert any("result_summary.json" in p for p in paths)
+    assert any("evidence_index.json" in p for p in paths)
+    assert any("postprocessing_summary.md" in p for p in paths)
+
+
+def test_prepare_solver_run_always_has_approval_and_no_execution(tmp_path: Path) -> None:
+    """requires_approval is always true and solver_execution_performed is always false."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("preflight-contracts"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "preflight.aieng"
+    _make_preflight_package(pkg_path)
+    project["aieng_file"] = "preflight.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "prepare solver run",
+        "project_id": project_id,
+        "tool_input": {"project_id": project_id},
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["requires_approval"] is True
+    assert result["solver_execution_performed"] is False
+    assert any("No solver execution" in w for w in result["warnings"])
+
+
+def test_prepare_solver_run_tool_registered_in_introspection(tmp_path: Path) -> None:
+    """cae.prepare_solver_run appears in /api/runtime/tools introspection."""
+    from app.main import create_app
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    resp = client.get("/api/runtime/tools")
+    assert resp.status_code == 200
+    tools = resp.json()
+    names = [t["name"] for t in tools]
+    assert "cae.prepare_solver_run" in names
+
+
+def test_prepare_solver_run_no_solver_subprocess(tmp_path: Path) -> None:
+    """cae.prepare_solver_run never invokes a subprocess (no solver execution)."""
+    from unittest.mock import patch, MagicMock
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("preflight-nosub"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "preflight.aieng"
+    _make_preflight_package(pkg_path)
+    project["aieng_file"] = "preflight.aieng"
+    save_project(settings, project)
+
+    mock_run = MagicMock()
+    with patch("subprocess.run", mock_run), patch("subprocess.Popen", MagicMock()):
+        resp = client.post("/api/runtime/runs", json={
+            "message": "prepare solver run",
+            "project_id": project_id,
+            "tool_input": {"project_id": project_id},
+        })
+
+    assert resp.status_code == 200
+    mock_run.assert_not_called()

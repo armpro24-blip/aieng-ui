@@ -2385,6 +2385,135 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return result
 
+    def _tool_cae_prepare_solver_run(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        import zipfile as _zipfile
+
+        package_path_str: str | None = inp.get("packagePath") or inp.get("package_path")
+        project_id: str | None = inp.get("project_id")
+        run_id: str = inp.get("runId") or inp.get("run_id") or "run_001"
+        solver: str = inp.get("solver") or "CalculiX"
+        load_case_id: str = inp.get("loadCaseId") or inp.get("load_case_id") or "load_case_001"
+        input_deck_path_str: str | None = inp.get("inputDeckPath") or inp.get("input_deck_path")
+        extract_results: bool = bool(inp.get("extractResults", inp.get("extract_results", True)))
+        refresh_summary: bool = bool(inp.get("refreshSummary", inp.get("refresh_summary", True)))
+
+        if not package_path_str and project_id:
+            proj = get_project(active_settings, project_id)
+            pkg = resolve_project_path(active_settings, project_id, proj.get("aieng_file"))
+            if pkg is not None and pkg.exists():
+                package_path_str = str(pkg)
+
+        if not package_path_str:
+            return {
+                "ok": False,
+                "tool": "cae.prepare_solver_run",
+                "status": "error",
+                "code": "missing_package_path",
+                "message": (
+                    "No package path provided and no project_id could be resolved. "
+                    "Pass packagePath or a project_id with an .aieng file."
+                ),
+            }
+
+        package_path = Path(package_path_str)
+        if not package_path.exists():
+            return {
+                "ok": False,
+                "tool": "cae.prepare_solver_run",
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Package not found: {package_path_str}",
+            }
+
+        try:
+            with _zipfile.ZipFile(package_path, "r") as zf:
+                names = set(zf.namelist())
+        except Exception as exc:
+            return {
+                "ok": False,
+                "tool": "cae.prepare_solver_run",
+                "status": "error",
+                "code": "package_read_error",
+                "message": f"Failed to read package: {exc}",
+            }
+
+        has_mesh = any(n.startswith("simulation/mesh/") for n in names)
+        has_solver_settings = "simulation/solver_settings.json" in names
+        has_load_case = f"simulation/load_cases/{load_case_id}.json" in names
+
+        if input_deck_path_str:
+            has_input_deck = Path(input_deck_path_str).exists()
+        else:
+            has_input_deck = f"simulation/runs/{run_id}/solver_input.inp" in names
+
+        # Check ccx availability without executing it
+        ccx_available = bool(
+            shutil.which("ccx")
+            or shutil.which("ccx_linux")
+            or shutil.which("ccx2.21")
+            or shutil.which("ccx_static")
+        )
+
+        missing_items: list[str] = []
+        if not has_mesh:
+            missing_items.append("simulation/mesh/ (no mesh files found in package)")
+        if not has_solver_settings:
+            missing_items.append("simulation/solver_settings.json")
+        if not has_load_case:
+            missing_items.append(f"simulation/load_cases/{load_case_id}.json")
+        if not has_input_deck:
+            deck_hint = f" (or external: {input_deck_path_str})" if input_deck_path_str else ""
+            missing_items.append(f"simulation/runs/{run_id}/solver_input.inp{deck_hint}")
+        if not ccx_available:
+            missing_items.append("CalculiX executable (ccx) not found on PATH")
+
+        ready_to_run = len(missing_items) == 0
+
+        run_prefix = f"simulation/runs/{run_id}"
+        planned_artifacts: list[dict[str, str]] = [
+            {"path": f"{run_prefix}/solver_run.json", "kind": "solver_run_record", "role": "run_metadata"},
+            {"path": f"{run_prefix}/solver_log.txt", "kind": "solver_log", "role": "solver_stdout"},
+            {"path": f"{run_prefix}/outputs/result.frd", "kind": "frd_result", "role": "primary_result"},
+        ]
+        if extract_results:
+            planned_artifacts.append(
+                {"path": "results/computed_metrics.json", "kind": "computed_metrics", "role": "extracted_metrics"}
+            )
+        if refresh_summary:
+            planned_artifacts.extend([
+                {"path": "results/result_summary.json", "kind": "result_summary", "role": "postprocessing_summary"},
+                {"path": "results/evidence_index.json", "kind": "evidence_index", "role": "evidence_index"},
+                {"path": "results/postprocessing_summary.md", "kind": "markdown_report", "role": "human_readable_summary"},
+            ])
+
+        warnings: list[str] = [
+            "No solver execution was performed.",
+            "This is a preflight plan only. Solver execution requires external CalculiX setup.",
+        ]
+        if not ready_to_run:
+            warnings.append(f"Run is not ready: {len(missing_items)} item(s) missing.")
+
+        return {
+            "ok": True,
+            "tool": "cae.prepare_solver_run",
+            "ready_to_run": ready_to_run,
+            "solver": solver,
+            "run_id": run_id,
+            "load_case_id": load_case_id,
+            "requires_approval": True,
+            "solver_execution_performed": False,
+            "preflight": {
+                "has_mesh": has_mesh,
+                "has_solver_settings": has_solver_settings,
+                "has_load_case": has_load_case,
+                "has_input_deck": has_input_deck,
+                "ccx_available": ccx_available,
+                "missing_items": missing_items,
+            },
+            "planned_artifacts": planned_artifacts,
+            "warnings": warnings,
+        }
+
     def _tool_freecad_run_macro(_inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
         # The execute_run() approval gate should prevent this from being called.
         # This body is a defensive belt-and-suspenders guard.
@@ -2463,6 +2592,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Parse a CalculiX FRD result file and write computed_metrics.json "
             "(max displacement, max von Mises stress) into a .aieng package. "
             "Extracts real numerical extrema from per-node field data."
+        ),
+    )
+    _rt.register_tool(
+        "cae.prepare_solver_run",
+        _tool_cae_prepare_solver_run,
+        description=(
+            "Inspect a .aieng package and return a reviewable solver run preflight plan. "
+            "Checks for mesh, solver settings, load case, and input deck presence. "
+            "No solver is executed; returns requires_approval=true and solver_execution_performed=false."
         ),
     )
     _rt.register_tool(
