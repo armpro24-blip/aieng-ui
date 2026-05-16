@@ -101,6 +101,8 @@ A vertical CAE workflow benchmark (`test_vertical_cae_workflow_end_to_end`) demo
 
 If you have CalculiX installed, you can run a real-environment smoke test: [`docs/quickstart-real-ccx.md`](docs/quickstart-real-ccx.md).
 
+Before demoing, use the [`docs/demo-readiness-checklist.md`](docs/demo-readiness-checklist.md).
+
 ## Documentation
 
 Repo-level docs:
