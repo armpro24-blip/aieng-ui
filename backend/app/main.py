@@ -3364,6 +3364,62 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "artifacts": result.get("artifacts", []),
         }
 
+    def _tool_aieng_validate(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import aieng_bridge
+        from pathlib import Path as _Path
+
+        package_path_str: str | None = inp.get("packagePath") or inp.get("package_path")
+        project_id: str | None = inp.get("project_id")
+
+        if not package_path_str and project_id:
+            proj = get_project(active_settings, project_id)
+            pkg = resolve_project_path(active_settings, project_id, proj.get("aieng_file"))
+            if pkg is not None and pkg.exists():
+                package_path_str = str(pkg)
+
+        if not package_path_str:
+            return {
+                "ok": False,
+                "tool": "aieng.validate",
+                "status": "error",
+                "code": "missing_package_path",
+                "message": "No package path provided and no project_id could be resolved.",
+            }
+
+        package_path = _Path(package_path_str)
+        if not package_path.exists():
+            return {
+                "ok": False,
+                "tool": "aieng.validate",
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Package not found: {package_path_str}",
+            }
+
+        try:
+            result = aieng_bridge.validate_package(
+                package_path,
+                aieng_root=active_settings.aieng_root,
+            )
+        except RuntimeError as exc:
+            return {
+                "ok": False,
+                "tool": "aieng.validate",
+                "status": "error",
+                "code": "validation_failed",
+                "message": str(exc),
+            }
+
+        return {
+            "ok": True,
+            "tool": "aieng.validate",
+            "status": "completed",
+            "package_path": str(package_path),
+            "validation_ok": result.get("ok"),
+            "messages": result.get("messages", []),
+            "counts": result.get("counts", {}),
+        }
+
     def _tool_aieng_write_evidence_scaffold(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
         from . import aieng_bridge
         from pathlib import Path as _Path
@@ -3631,6 +3687,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description=(
             "Write evidence_index.json and claim_map.json scaffold into a .aieng package. "
             "Required before importing external solver or mesh evidence."
+        ),
+    )
+    _rt.register_tool(
+        "aieng.validate",
+        _tool_aieng_validate,
+        description=(
+            "Validate a .aieng package against AIENG schemas and rules. "
+            "Returns PASS/WARN/FAIL messages and an overall validation_ok boolean."
         ),
     )
     _rt.register_tool(

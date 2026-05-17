@@ -391,6 +391,14 @@ _INTENT_MAP: list[tuple[list[str], str, str]] = [
         "aieng.write_evidence_scaffold",
         "Write evidence_index.json and claim_map.json scaffold into a .aieng package",
     ),
+    (
+        [
+            "validate package", "validation", "check package",
+            "校验包", "验证包", "检查包",
+        ],
+        "aieng.validate",
+        "Validate a .aieng package against AIENG schemas and rules",
+    ),
 ]
 
 

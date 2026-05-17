@@ -2842,6 +2842,78 @@ def test_cae_import_solver_evidence_missing_result_file_returns_error(tmp_path: 
 # aieng.write_evidence_scaffold
 # ---------------------------------------------------------------------------
 
+def test_aieng_validate_success(tmp_path: Path) -> None:
+    """aieng.validate returns PASS/WARN/FAIL messages for a real package."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("validate-test"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "validate.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "validate.aieng"
+    save_project(settings, project)
+
+    original_build = _rt.build_plan
+    _rt.build_plan = lambda msg, pid: [
+        {"name": "aieng.validate", "description": "validate", "input": {"project_id": pid}}
+    ]
+    try:
+        resp = client.post("/api/runtime/runs", json={
+            "message": "validate package",
+            "project_id": project_id,
+            "tool_input": {"project_id": project_id},
+        })
+    finally:
+        _rt.build_plan = original_build
+
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "completed"
+    result = run["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert "validation_ok" in result
+    assert "messages" in result
+    assert "counts" in result
+    assert isinstance(result["messages"], list)
+    assert any(m["level"] == "PASS" for m in result["messages"])
+
+
+def test_aieng_validate_missing_package_returns_error(tmp_path: Path) -> None:
+    """aieng.validate returns error when package is missing."""
+    from app.main import create_app, default_project, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("validate-missing"))
+    project_id = project["id"]
+
+    original_build = _rt.build_plan
+    _rt.build_plan = lambda msg, pid: [
+        {"name": "aieng.validate", "description": "validate", "input": {"project_id": pid}}
+    ]
+    try:
+        resp = client.post("/api/runtime/runs", json={
+            "message": "validate package",
+            "project_id": project_id,
+            "tool_input": {"project_id": project_id},
+        })
+    finally:
+        _rt.build_plan = original_build
+
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["ok"] is False
+    assert result["code"] == "missing_package_path"
+
+
 def test_aieng_write_evidence_scaffold_success(tmp_path: Path) -> None:
     """aieng.write_evidence_scaffold creates evidence_index.json and claim_map.json."""
     from app.main import create_app, default_project, project_dir, save_project

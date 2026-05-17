@@ -391,6 +391,65 @@ def import_solver_evidence(
                 pass
 
 
+def validate_package(
+    package_path: str | Path,
+    *,
+    aieng_root: str | Path,
+) -> dict[str, Any]:
+    """Validate a .aieng package against AIENG schemas and rules.
+
+    Imports ``aieng.validate.validate_package`` from ``aieng_root/src``.
+    Raises RuntimeError if the import fails.
+
+    Args:
+        package_path: Path to the .aieng package.
+        aieng_root: Root of the aieng repo checkout.
+
+    Returns:
+        Dict with status, ok, messages (list of {level, text}), and summary counts.
+    """
+    pkg = Path(package_path)
+    if not pkg.exists():
+        raise FileNotFoundError(f"Package not found: {pkg}")
+
+    aieng_src = Path(aieng_root) / "src"
+    if not aieng_src.exists():
+        raise RuntimeError(f"aieng src not found at {aieng_src}")
+
+    injected = False
+    try:
+        candidate = str(aieng_src)
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            injected = True
+        from aieng.validate import validate_package as _validate_package  # type: ignore[import]
+
+        report = _validate_package(pkg)
+        messages = [
+            {"level": msg.level.value, "text": msg.text}
+            for msg in report.messages
+        ]
+        counts: dict[str, int] = {}
+        for msg in report.messages:
+            level = msg.level.value
+            counts[level] = counts.get(level, 0) + 1
+        return {
+            "status": "ok",
+            "package_path": str(pkg),
+            "ok": report.ok,
+            "messages": messages,
+            "counts": counts,
+        }
+    except Exception as exc:
+        raise RuntimeError(f"Failed to validate package: {exc}") from exc
+    finally:
+        if injected:
+            try:
+                sys.path.remove(candidate)
+            except ValueError:
+                pass
+
+
 def write_evidence_scaffold(
     package_path: str | Path,
     *,
