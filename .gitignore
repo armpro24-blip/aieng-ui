@@ -73,3 +73,6 @@ vite.svg
 data/projects/
 data/runtime/
 !data/.gitkeep
+
+# Claude Code local configuration
+.claude/
