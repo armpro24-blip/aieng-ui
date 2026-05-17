@@ -3332,6 +3332,96 @@ def test_run_solver_mocked_subprocess_success(tmp_path: Path) -> None:
     assert "simulation/runs/run_001/outputs/result.frd" in run_meta["output_files"]
 
 
+def test_run_solver_auto_imports_evidence_when_dat_present(tmp_path: Path) -> None:
+    """cae.run_solver auto-imports solver evidence when .dat file is present after successful run."""
+    from unittest.mock import patch, MagicMock
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("solver-auto-import"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "solver.aieng"
+    _make_preflight_package(pkg_path, input_deck=True)
+    project["aieng_file"] = "solver.aieng"
+    save_project(settings, project)
+
+    def fake_run(cmd, **kwargs):
+        cwd = Path(kwargs.get("cwd", "."))
+        frd_path = cwd / "solver_input.frd"
+        frd_path.write_text(_make_test_frd({1: [1.0, 0.0, 0.0, 1.0]}, None), encoding="utf-8")
+        dat_path = cwd / "solver_input.dat"
+        dat_path.write_text(
+            "max von Mises stress = 180.5 MPa\n"
+            "maximum displacement = 0.42 mm\n",
+            encoding="utf-8",
+        )
+        return MagicMock(returncode=0, stdout="solver completed\n", stderr="")
+
+    with patch("app.main.shutil.which", return_value="/fake/ccx"), \
+         patch("subprocess.run", side_effect=fake_run):
+        data = _execute_run_solver(client, project_id, {
+            "project_id": project_id,
+            "input_deck_path": "simulation/runs/run_001/solver_input.inp",
+            "extract_results": False,
+            "refresh_summary": False,
+        })
+
+    assert data["status"] == "completed"
+    result = data["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert result["return_code"] == 0
+    assert result.get("auto_import") is not None
+    assert result["auto_import"]["status"] == "ok"
+    assert any(a["path"] == "results/evidence_index.json" for a in result["changed_artifacts"])
+
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        assert "results/evidence_index.json" in zf.namelist()
+
+
+def test_run_solver_skips_auto_import_when_disabled(tmp_path: Path) -> None:
+    """cae.run_solver skips auto-import when auto_import_evidence is false."""
+    from unittest.mock import patch, MagicMock
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("solver-no-auto"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "solver.aieng"
+    _make_preflight_package(pkg_path, input_deck=True)
+    project["aieng_file"] = "solver.aieng"
+    save_project(settings, project)
+
+    def fake_run(cmd, **kwargs):
+        cwd = Path(kwargs.get("cwd", "."))
+        frd_path = cwd / "solver_input.frd"
+        frd_path.write_text(_make_test_frd({1: [1.0, 0.0, 0.0, 1.0]}, None), encoding="utf-8")
+        dat_path = cwd / "solver_input.dat"
+        dat_path.write_text("max von Mises stress = 180.5 MPa\n", encoding="utf-8")
+        return MagicMock(returncode=0, stdout="", stderr="")
+
+    with patch("app.main.shutil.which", return_value="/fake/ccx"), \
+         patch("subprocess.run", side_effect=fake_run):
+        data = _execute_run_solver(client, project_id, {
+            "project_id": project_id,
+            "input_deck_path": "simulation/runs/run_001/solver_input.inp",
+            "extract_results": False,
+            "refresh_summary": False,
+            "auto_import_evidence": False,
+        })
+
+    result = data["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert "auto_import" not in result
+
+
 def test_run_solver_writes_frd_to_outputs(tmp_path: Path) -> None:
     """cae.run_solver writes result.frd into simulation/runs/<run_id>/outputs/."""
     from unittest.mock import patch, MagicMock

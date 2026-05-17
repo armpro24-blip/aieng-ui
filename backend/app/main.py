@@ -2978,6 +2978,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         refresh_summary: bool = bool(inp.get("refreshSummary", inp.get("refresh_summary", True)))
         overwrite: bool = bool(inp.get("overwrite", True))
         timeout_seconds: int = int(inp.get("timeout_seconds", inp.get("timeoutSeconds", 120)))
+        auto_import_evidence: bool = bool(inp.get("autoImportEvidence", inp.get("auto_import_evidence", True)))
 
         # Resolve package path
         if not package_path_str and project_id:
@@ -3207,6 +3208,48 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 except Exception as exc:
                     warnings.append(f"FRD extraction failed: {exc}")
 
+            # Auto-import solver evidence (.dat) if solver succeeded and file exists
+            auto_import_result: dict[str, Any] | None = None
+            if auto_import_evidence and solved:
+                dat_path = work_dir / f"{stem}.dat"
+                if dat_path.exists():
+                    # Ensure evidence scaffold exists before importing
+                    try:
+                        with _zipfile.ZipFile(package_path, "r") as zf:
+                            has_scaffold = (
+                                "results/evidence_index.json" in zf.namelist()
+                                and "results/claim_map.json" in zf.namelist()
+                            )
+                    except Exception:
+                        has_scaffold = False
+                    if not has_scaffold:
+                        try:
+                            aieng_bridge.write_evidence_scaffold(
+                                package_path,
+                                aieng_root=active_settings.aieng_root,
+                                overwrite=False,
+                            )
+                        except Exception as exc:
+                            warnings.append(f"Auto-scaffold for evidence import failed: {exc}")
+                    try:
+                        import_result = aieng_bridge.import_solver_evidence(
+                            package_path,
+                            dat_path,
+                            aieng_root=active_settings.aieng_root,
+                            result_format="calculix_dat",
+                            producer_tool="calculix",
+                            claim_support=["claim_solver_result_001"],
+                        )
+                        auto_import_result = {
+                            "status": "ok",
+                            "evidence_id": import_result.get("evidence_id"),
+                            "artifacts": import_result.get("artifacts", []),
+                        }
+                        changed_artifacts.extend(import_result.get("artifacts", []))
+                    except Exception as exc:
+                        warnings.append(f"Auto-import of solver evidence failed: {exc}")
+                        auto_import_result = {"status": "error", "message": str(exc)}
+
             # Refresh summaries if requested
             refreshed_summaries: list[str] = []
             if refresh_summary:
@@ -3244,6 +3287,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 result["extracted_metrics"] = extracted_metrics
             if refreshed_summaries:
                 result["refreshed_summaries"] = refreshed_summaries
+            if auto_import_result is not None:
+                result["auto_import"] = auto_import_result
             return result
 
         finally:
