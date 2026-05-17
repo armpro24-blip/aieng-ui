@@ -1,4 +1,32 @@
-﻿export type CaeMode = "cad_only" | "cae_setup" | "cae_result" | "cae_validation";
+﻿export type DesignTargetComparisonStatus = "pass" | "fail" | "unknown" | "not_evaluated";
+
+export type DesignTargetComparisonItem = {
+  target_id: string;
+  target_type?: string;
+  expected?: unknown;
+  actual?: unknown;
+  comparator?: string;
+  status: DesignTargetComparisonStatus;
+  evidence_refs?: string[];
+  source_artifacts?: string[];
+  notes?: string;
+};
+
+export type DesignTargetComparisons = {
+  present?: boolean;
+  target_set_id?: string;
+  evaluated_at?: string;
+  summary?: {
+    total?: number;
+    pass?: number;
+    fail?: number;
+    unknown?: number;
+    not_evaluated?: number;
+  };
+  items?: DesignTargetComparisonItem[];
+};
+
+export type CaeMode = "cad_only" | "cae_setup" | "cae_result" | "cae_validation";
 
 export type CaePreprocessingSummary = {
   schema_version: string;
@@ -294,6 +322,7 @@ export type ProjectSummary = {
           metrics: Record<string, unknown>;
         }> | null;
       };
+      design_target_comparisons?: DesignTargetComparisons | null;
       llm_summary: {
         one_line: string;
         key_findings: string[];

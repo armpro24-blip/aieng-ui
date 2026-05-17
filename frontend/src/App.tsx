@@ -2822,6 +2822,78 @@ export default function App() {
                           </div>
                         </div>
                       ) : null}
+                      {caeSummary.result_summary.design_target_comparisons?.present ? (
+                        <div style={{ marginTop: 10 }}>
+                          <small><strong>Design Targets — Artifact-level comparison</strong></small>
+                          {caeSummary.result_summary.design_target_comparisons.summary ? (
+                            <div style={{ marginTop: 4 }}>
+                              <small>
+                                Total {caeSummary.result_summary.design_target_comparisons.summary.total ?? 0}
+                                {", "} pass: {caeSummary.result_summary.design_target_comparisons.summary.pass ?? 0}
+                                {", "} fail: {caeSummary.result_summary.design_target_comparisons.summary.fail ?? 0}
+                                {", "} unknown: {caeSummary.result_summary.design_target_comparisons.summary.unknown ?? 0}
+                                {", "} not evaluated: {caeSummary.result_summary.design_target_comparisons.summary.not_evaluated ?? 0}
+                              </small>
+                            </div>
+                          ) : null}
+                          {caeSummary.result_summary.design_target_comparisons.items && caeSummary.result_summary.design_target_comparisons.items.length > 0 ? (
+                            <table style={{ marginTop: 6, fontSize: "0.85em", width: "100%", borderCollapse: "collapse" }}>
+                              <thead>
+                                <tr style={{ borderBottom: "1px solid #ddd" }}>
+                                  <th style={{ textAlign: "left", padding: "2px 4px" }}><small>Target</small></th>
+                                  <th style={{ textAlign: "left", padding: "2px 4px" }}><small>Expected</small></th>
+                                  <th style={{ textAlign: "left", padding: "2px 4px" }}><small>Actual</small></th>
+                                  <th style={{ textAlign: "left", padding: "2px 4px" }}><small>Status</small></th>
+                                </tr>
+                              </thead>
+                              <tbody>
+                                {caeSummary.result_summary.design_target_comparisons.items.map((item) => (
+                                  <tr key={item.target_id} style={{ borderBottom: "1px solid #eee" }}>
+                                    <td style={{ padding: "2px 4px" }}>
+                                      <small>{item.target_id}</small>
+                                      {item.target_type ? <small style={{ display: "block", color: "#666" }}>{item.target_type}</small> : null}
+                                    </td>
+                                    <td style={{ padding: "2px 4px" }}>
+                                      <small>{item.expected && typeof item.expected === "object" && "threshold" in item.expected ? String(item.expected.threshold) : "—"}</small>
+                                    </td>
+                                    <td style={{ padding: "2px 4px" }}>
+                                      <small>{item.actual && typeof item.actual === "object" && "value" in item.actual ? String(item.actual.value) : "—"}</small>
+                                    </td>
+                                    <td style={{ padding: "2px 4px" }}>
+                                      <span style={{
+                                        padding: "2px 6px",
+                                        borderRadius: 4,
+                                        fontSize: "0.75em",
+                                        fontWeight: 600,
+                                        backgroundColor:
+                                          item.status === "pass" ? "#d4edda" :
+                                          item.status === "fail" ? "#f8d7da" :
+                                          item.status === "unknown" ? "#fff3cd" : "#e2e3e5",
+                                        color:
+                                          item.status === "pass" ? "#155724" :
+                                          item.status === "fail" ? "#721c24" :
+                                          item.status === "unknown" ? "#856404" : "#383d41",
+                                      }}>
+                                        {item.status === "pass" ? "Meets target" :
+                                         item.status === "fail" ? "Does not meet target" :
+                                         item.status === "unknown" ? "Evidence incomplete" : "Not evaluated"}
+                                      </span>
+                                      {item.notes ? <small style={{ display: "block", color: "#666", marginTop: 2 }}>{item.notes}</small> : null}
+                                    </td>
+                                  </tr>
+                                ))}
+                              </tbody>
+                            </table>
+                          ) : null}
+                          <div style={{ marginTop: 4 }}>
+                            <small className="summary-muted">Not an engineering certification. Claims are not advanced automatically.</small>
+                          </div>
+                        </div>
+                      ) : caeSummary.result_summary.status.has_results ? (
+                        <div style={{ marginTop: 10 }}>
+                          <small className="summary-muted">No design target comparisons available. Run <code>aieng compare-design-targets &lt;package&gt; --write-summary</code> to generate them.</small>
+                        </div>
+                      ) : null}
                       {caeSummary.result_summary.llm_summary.limitations.length ? (
                         <div style={{ marginTop: 6 }}>
                           <small>
