@@ -573,7 +573,16 @@ def write_field_summary(
                 "artifacts": [],
             }
         raise
-    except (FileNotFoundError, FileExistsError, ValueError):
+    except FileNotFoundError as exc:
+        if "field_regions" in str(exc):
+            return {
+                "status": "skipped",
+                "package_path": str(pkg),
+                "reason": f"Field regions artifact missing: {exc}",
+                "artifacts": [],
+            }
+        raise
+    except (FileExistsError, ValueError):
         raise
     except Exception as exc:
         raise RuntimeError(f"Failed to write field summary: {exc}") from exc

@@ -2982,8 +2982,9 @@ def test_cae_extract_field_regions_success(tmp_path: Path) -> None:
     assert len(written["clusters"]) >= 1
 
 
-def test_write_field_summary_skipped_when_core_module_missing(tmp_path: Path) -> None:
+def test_write_field_summary_skipped_when_core_module_missing(monkeypatch, tmp_path: Path) -> None:
     """When aieng.cae_field_summary is removed, write_field_summary returns skipped without crashing."""
+    import builtins
     from app import aieng_bridge
     from app.main import Settings
 
@@ -2999,6 +3000,15 @@ def test_write_field_summary_skipped_when_core_module_missing(tmp_path: Path) ->
     pkg_path = tmp_path / "test.aieng"
     _make_setup_package(pkg_path)
 
+    real_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "aieng.cae_field_summary":
+            raise ModuleNotFoundError(f"No module named '{name}'")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+
     result = aieng_bridge.write_field_summary(
         pkg_path,
         aieng_root=settings.aieng_root,
@@ -3007,6 +3017,70 @@ def test_write_field_summary_skipped_when_core_module_missing(tmp_path: Path) ->
     assert result["status"] == "skipped"
     assert "cae_field_summary" in result["reason"]
     assert result["artifacts"] == []
+
+
+def test_write_field_summary_skipped_when_field_regions_missing(monkeypatch, tmp_path: Path) -> None:
+    """When results/field_regions.json is missing, write_field_summary returns skipped without crashing."""
+    import aieng.cae_field_summary
+    from app import aieng_bridge
+    from app.main import Settings
+
+    settings = Settings(
+        platform_root=tmp_path / "platform",
+        workspace_root=tmp_path / "workspace",
+        data_root=tmp_path / "data",
+        aieng_root=_WORKSPACE_ROOT / "aieng",
+        freecad_mcp_root=_WORKSPACE_ROOT / "aieng_freecad_mcp",
+        freecad_home=tmp_path / "freecad",
+        sample_step=tmp_path / "sample.step",
+    )
+    pkg_path = tmp_path / "test.aieng"
+    _make_setup_package(pkg_path)
+
+    def fake_write(pkg, overwrite=False):
+        raise FileNotFoundError("results/field_regions.json missing")
+
+    monkeypatch.setattr(aieng.cae_field_summary, "write_field_summary_package", fake_write)
+
+    result = aieng_bridge.write_field_summary(
+        pkg_path,
+        aieng_root=settings.aieng_root,
+        overwrite=False,
+    )
+    assert result["status"] == "skipped"
+    assert "field_regions" in result["reason"].lower()
+    assert result["artifacts"] == []
+
+
+def test_write_field_summary_ok(monkeypatch, tmp_path: Path) -> None:
+    """When field summary succeeds, write_field_summary returns ok with artifacts."""
+    import aieng.cae_field_summary
+    from app import aieng_bridge
+    from app.main import Settings
+
+    settings = Settings(
+        platform_root=tmp_path / "platform",
+        workspace_root=tmp_path / "workspace",
+        data_root=tmp_path / "data",
+        aieng_root=_WORKSPACE_ROOT / "aieng",
+        freecad_mcp_root=_WORKSPACE_ROOT / "aieng_freecad_mcp",
+        freecad_home=tmp_path / "freecad",
+        sample_step=tmp_path / "sample.step",
+    )
+    pkg_path = tmp_path / "test.aieng"
+    _make_setup_package(pkg_path, extra={"results/field_regions.json": {"clusters": []}})
+
+    monkeypatch.setattr(aieng.cae_field_summary, "write_field_summary_package", lambda pkg, overwrite=False: None)
+
+    result = aieng_bridge.write_field_summary(
+        pkg_path,
+        aieng_root=settings.aieng_root,
+        overwrite=False,
+    )
+    assert result["status"] == "ok"
+    assert result["package_path"] == str(pkg_path)
+    assert len(result["artifacts"]) == 2
+    assert any(a["path"] == "results/field_summary.json" for a in result["artifacts"])
 
 
 def test_extract_field_regions_passes_field_summary_status(monkeypatch, tmp_path: Path) -> None:
