@@ -2543,6 +2543,43 @@ def _make_test_frd(
     return "\n".join(lines) + "\n"
 
 
+def _make_test_frd_with_coords(
+    coords: dict[int, tuple[float, float, float]],
+    disp_nodes: dict | None = None,
+    stress_nodes: dict | None = None,
+) -> str:
+    """Build an FRD with mesh coordinates followed by field data."""
+    lines = ["    1C                                                                         1"]
+    for nid, (x, y, z) in coords.items():
+        lines.append(_frd_node_line(nid, [x, y, z]))
+    if disp_nodes is not None:
+        lines += [
+            "    -4  DISP        4    1",
+            "    -5  D1          1    2    1    0",
+            "    -5  D2          1    2    2    0",
+            "    -5  D3          1    2    3    0",
+            "    -5  ALL         1    2    0    1",
+        ]
+        for nid, vals in disp_nodes.items():
+            lines.append(_frd_node_line(nid, vals))
+        lines.append("    -3")
+    if stress_nodes is not None:
+        lines += [
+            "    -4  S           6    1",
+            "    -5  SXX         1    4    1    1",
+            "    -5  SYY         1    4    2    1",
+            "    -5  SZZ         1    4    3    1",
+            "    -5  SXY         1    4    4    1",
+            "    -5  SXZ         1    4    5    1",
+            "    -5  SYZ         1    4    6    1",
+        ]
+        for nid, vals in stress_nodes.items():
+            lines.append(_frd_node_line(nid, vals))
+        lines.append("    -3")
+    lines.append(" 9999")
+    return "\n".join(lines) + "\n"
+
+
 def test_cae_extract_solver_results_success(tmp_path: Path) -> None:
     """cae.extract_solver_results parses FRD and writes computed_metrics.json into package."""
     from app.main import create_app, default_project, project_dir, save_project
@@ -2647,6 +2684,144 @@ def test_cae_extract_solver_results_missing_frd_path_returns_error(tmp_path: Pat
 
     resp = client.post("/api/runtime/runs", json={
         "message": "extract solver results",
+        "project_id": project_id,
+        "tool_input": {"project_id": project_id},
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "error"
+    assert result["code"] == "missing_frd_path"
+
+
+# ---------------------------------------------------------------------------
+# Phase 31 — cae.extract_field_regions runtime tool
+# ---------------------------------------------------------------------------
+
+def test_cae_extract_field_regions_success(tmp_path: Path) -> None:
+    """cae.extract_field_regions parses FRD with coordinates and writes field_regions.json."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("field-regions"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "field-regions.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "field-regions.aieng"
+    save_project(settings, project)
+
+    # Two spatial groups: low-stress near origin, high-stress near x=10
+    coords = {
+        1: (0.0, 0.0, 0.0),
+        2: (0.1, 0.0, 0.0),
+        3: (0.2, 0.0, 0.0),
+        4: (0.3, 0.0, 0.0),
+        5: (0.4, 0.0, 0.0),
+        6: (10.0, 0.0, 0.0),
+        7: (10.1, 0.0, 0.0),
+        8: (10.2, 0.0, 0.0),
+        9: (10.3, 0.0, 0.0),
+        10: (10.4, 0.0, 0.0),
+    }
+    stress = {
+        1: [10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        2: [20.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        3: [30.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        4: [40.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        5: [50.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        6: [200.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        7: [210.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        8: [220.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        9: [230.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        10: [240.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    }
+    frd_path = tmp_path / "job.frd"
+    frd_path.write_text(_make_test_frd_with_coords(coords, stress_nodes=stress), encoding="utf-8")
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "extract field regions",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "frdPath": str(frd_path),
+            "field": "S",
+            "metric": "von_mises",
+            "maxClusters": 3,
+            "thresholdPercentile": 80.0,
+        },
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "completed"
+    result = run["tool_results"][0]["output"]
+    assert result["status"] == "completed"
+    assert result["cluster_count"] >= 1
+    clusters = result["clusters"]
+    assert len(clusters) >= 1
+    # The high-stress group near x=10 should form at least one cluster
+    assert any(c["node_count"] >= 3 for c in clusters)
+    assert any("field_regions" in a["path"] for a in result["artifacts"])
+
+    # Verify package was updated
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        assert "results/field_regions.json" in zf.namelist()
+        written = json.loads(zf.read("results/field_regions.json"))
+    assert written["format_version"] is not None
+    assert written["cluster_count"] >= 1
+    assert len(written["clusters"]) >= 1
+
+
+def test_cae_extract_field_regions_missing_frd_returns_error(tmp_path: Path) -> None:
+    """cae.extract_field_regions returns error when frdPath does not exist."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("frd-missing-regions"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "regions-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "regions-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "extract field regions",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "frdPath": str(tmp_path / "nonexistent.frd"),
+        },
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "error"
+    assert result["code"] == "file_not_found"
+
+
+def test_cae_extract_field_regions_missing_frd_path_returns_error(tmp_path: Path) -> None:
+    """cae.extract_field_regions returns error when frdPath is not provided."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("frd-nopath-regions"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "regions-test.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "regions-test.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "extract field regions",
         "project_id": project_id,
         "tool_input": {"project_id": project_id},
     })

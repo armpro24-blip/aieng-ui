@@ -450,6 +450,154 @@ def validate_package(
                 pass
 
 
+def extract_field_regions(
+    package_path: str | Path,
+    frd_path: str | Path,
+    *,
+    aieng_root: str | Path,
+    field: str = "S",
+    metric: str = "von_mises",
+    max_clusters: int = 3,
+    threshold_percentile: float = 90.0,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Extract high-magnitude field regions from a CalculiX FRD file.
+
+    Imports ``aieng.simulation.field_region_extractor.extract_field_regions_package``
+    from ``aieng_root/src``. Raises RuntimeError if the import or extraction fails.
+
+    Args:
+        package_path: Path to the .aieng package.
+        frd_path: Path to the CalculiX .frd result file.
+        aieng_root: Root of the aieng repo checkout.
+        field: FRD field name to analyse (``'S'`` or ``'DISP'``).
+        metric: Metric to compute per node (``'von_mises'`` or ``'magnitude'``).
+        max_clusters: Maximum number of clusters to return.
+        threshold_percentile: Percentile cutoff for high-magnitude nodes.
+        overwrite: Whether to overwrite an existing field_regions.json.
+
+    Returns:
+        Dict with status, out_path, cluster_count, clusters, and warnings.
+    """
+    pkg = Path(package_path)
+    frd = Path(frd_path)
+    if not pkg.exists():
+        raise FileNotFoundError(f"Package not found: {pkg}")
+    if not frd.exists():
+        raise FileNotFoundError(f"FRD file not found: {frd}")
+
+    aieng_src = Path(aieng_root) / "src"
+    if not aieng_src.exists():
+        raise RuntimeError(f"aieng src not found at {aieng_src}")
+
+    injected = False
+    try:
+        candidate = str(aieng_src)
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            injected = True
+        from aieng.simulation.field_region_extractor import (  # type: ignore[import]
+            FieldRegionError,
+            extract_field_regions_package,
+        )
+
+        result = extract_field_regions_package(
+            pkg,
+            frd,
+            field=field,
+            metric=metric,
+            max_clusters=max_clusters,
+            threshold_percentile=threshold_percentile,
+            overwrite=overwrite,
+        )
+        return {
+            "status": "ok",
+            "package_path": str(pkg),
+            "out_path": result.get("out_path"),
+            "cluster_count": result.get("cluster_count", 0),
+            "clusters": result.get("clusters", []),
+            "warnings": result.get("warnings", []),
+        }
+    except FieldRegionError as exc:
+        raise ValueError(str(exc)) from exc
+    except (FileNotFoundError, ValueError):
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to extract field regions: {exc}") from exc
+    finally:
+        if injected:
+            try:
+                sys.path.remove(candidate)
+            except ValueError:
+                pass
+
+
+def generate_solver_input(
+    package_path: str | Path,
+    *,
+    aieng_root: str | Path,
+    run_id: str = "run_001",
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Generate a runnable CalculiX solver input deck from a .aieng package.
+
+    Imports ``aieng.simulation.deck_generator.generate_solver_input_package``
+    from ``aieng_root/src``. Raises RuntimeError if the import or generation fails.
+
+    Args:
+        package_path: Path to the .aieng package.
+        aieng_root: Root of the aieng repo checkout.
+        run_id: Solver run identifier.
+        overwrite: Whether to overwrite an existing solver input deck.
+
+    Returns:
+        Dict with status, out_path, missing_items, and warnings.
+    """
+    pkg = Path(package_path)
+    if not pkg.exists():
+        raise FileNotFoundError(f"Package not found: {pkg}")
+
+    aieng_src = Path(aieng_root) / "src"
+    if not aieng_src.exists():
+        raise RuntimeError(f"aieng src not found at {aieng_src}")
+
+    injected = False
+    try:
+        candidate = str(aieng_src)
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            injected = True
+        from aieng.simulation.deck_generator import (  # type: ignore[import]
+            MissingSetupError,
+            generate_solver_input_package,
+        )
+
+        result = generate_solver_input_package(
+            pkg,
+            run_id=run_id,
+            overwrite=overwrite,
+        )
+        return {
+            "status": "ok",
+            "package_path": str(pkg),
+            "out_path": result.get("out_path"),
+            "missing_items": result.get("missing_items", []),
+            "warnings": result.get("warnings", []),
+        }
+    except MissingSetupError as exc:
+        raise ValueError(str(exc)) from exc
+    except (FileNotFoundError, ValueError):
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to generate solver input: {exc}") from exc
+    finally:
+        if injected:
+            try:
+                sys.path.remove(candidate)
+            except ValueError:
+                pass
+
+
 def write_completeness_report(
     package_path: str | Path,
     *,

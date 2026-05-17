@@ -2831,6 +2831,109 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return result
 
+    def _tool_cae_extract_field_regions(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import aieng_bridge
+        from pathlib import Path as _Path
+
+        package_path_str: str | None = inp.get("packagePath") or inp.get("package_path")
+        project_id: str | None = inp.get("project_id")
+        frd_path: str | None = inp.get("frdPath") or inp.get("frd_path")
+        field: str = inp.get("field") or "S"
+        metric: str = inp.get("metric") or "von_mises"
+        max_clusters: int = int(inp.get("maxClusters") or inp.get("max_clusters") or 3)
+        threshold_percentile: float = float(
+            inp.get("thresholdPercentile") or inp.get("threshold_percentile") or 90.0
+        )
+        overwrite: bool = bool(inp.get("overwrite", False))
+
+        if not package_path_str and project_id:
+            proj = get_project(active_settings, project_id)
+            pkg = resolve_project_path(active_settings, project_id, proj.get("aieng_file"))
+            if pkg is not None and pkg.exists():
+                package_path_str = str(pkg)
+
+        if not package_path_str:
+            return {
+                "ok": False,
+                "tool": "cae.extract_field_regions",
+                "status": "error",
+                "code": "missing_package_path",
+                "message": "No package path provided and no project_id could be resolved.",
+            }
+
+        if not frd_path:
+            return {
+                "ok": False,
+                "tool": "cae.extract_field_regions",
+                "status": "error",
+                "code": "missing_frd_path",
+                "message": "No frdPath provided. Pass the path to the CalculiX .frd result file.",
+            }
+
+        if not _Path(package_path_str).exists():
+            return {
+                "ok": False,
+                "tool": "cae.extract_field_regions",
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Package not found: {package_path_str}",
+            }
+
+        if not _Path(frd_path).exists():
+            return {
+                "ok": False,
+                "tool": "cae.extract_field_regions",
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"FRD file not found: {frd_path}",
+            }
+
+        try:
+            result = aieng_bridge.extract_field_regions(
+                package_path_str,
+                frd_path,
+                aieng_root=active_settings.aieng_root,
+                field=field,
+                metric=metric,
+                max_clusters=max_clusters,
+                threshold_percentile=threshold_percentile,
+                overwrite=overwrite,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            return {
+                "ok": False,
+                "tool": "cae.extract_field_regions",
+                "status": "error",
+                "code": "extraction_error",
+                "message": str(exc),
+            }
+        except RuntimeError as exc:
+            return {
+                "ok": False,
+                "tool": "cae.extract_field_regions",
+                "status": "error",
+                "code": "bridge_error",
+                "message": str(exc),
+            }
+
+        return {
+            "ok": True,
+            "tool": "cae.extract_field_regions",
+            "status": "completed",
+            "package_path": package_path_str,
+            "out_path": result.get("out_path"),
+            "cluster_count": result.get("cluster_count", 0),
+            "clusters": result.get("clusters", []),
+            "warnings": result.get("warnings", []),
+            "artifacts": [
+                {
+                    "path": result.get("out_path", ""),
+                    "kind": "field_regions",
+                    "role": "high_magnitude_spatial_clusters",
+                }
+            ],
+        }
+
     def _tool_cae_prepare_solver_run(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
         import zipfile as _zipfile
 
@@ -2958,6 +3061,81 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             },
             "planned_artifacts": planned_artifacts,
             "warnings": warnings,
+        }
+
+    def _tool_cae_generate_solver_input(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import aieng_bridge
+        from pathlib import Path as _Path
+
+        package_path_str: str | None = inp.get("packagePath") or inp.get("package_path")
+        project_id: str | None = inp.get("project_id")
+        run_id: str = inp.get("runId") or inp.get("run_id") or "run_001"
+        overwrite: bool = bool(inp.get("overwrite", False))
+
+        if not package_path_str and project_id:
+            proj = get_project(active_settings, project_id)
+            pkg = resolve_project_path(active_settings, project_id, proj.get("aieng_file"))
+            if pkg is not None and pkg.exists():
+                package_path_str = str(pkg)
+
+        if not package_path_str:
+            return {
+                "ok": False,
+                "tool": "cae.generate_solver_input",
+                "status": "error",
+                "code": "missing_package_path",
+                "message": "No package path provided and no project_id could be resolved.",
+            }
+
+        package_path = _Path(package_path_str)
+        if not package_path.exists():
+            return {
+                "ok": False,
+                "tool": "cae.generate_solver_input",
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Package not found: {package_path_str}",
+            }
+
+        try:
+            result = aieng_bridge.generate_solver_input(
+                package_path,
+                aieng_root=active_settings.aieng_root,
+                run_id=run_id,
+                overwrite=overwrite,
+            )
+        except ValueError as exc:
+            return {
+                "ok": False,
+                "tool": "cae.generate_solver_input",
+                "status": "error",
+                "code": "missing_setup",
+                "message": str(exc),
+                "missing_items": getattr(exc, "missing_items", []),
+            }
+        except RuntimeError as exc:
+            return {
+                "ok": False,
+                "tool": "cae.generate_solver_input",
+                "status": "error",
+                "code": "generation_failed",
+                "message": str(exc),
+            }
+
+        return {
+            "ok": True,
+            "tool": "cae.generate_solver_input",
+            "status": "completed",
+            "package_path": str(package_path),
+            "out_path": result.get("out_path"),
+            "warnings": result.get("warnings", []),
+            "artifacts": [
+                {
+                    "path": result.get("out_path", ""),
+                    "kind": "solver_input_deck",
+                    "role": "calculix_linear_static_input",
+                }
+            ],
         }
 
     def _tool_cae_run_solver(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
@@ -4008,12 +4186,31 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         ),
     )
     _rt.register_tool(
+        "cae.extract_field_regions",
+        _tool_cae_extract_field_regions,
+        description=(
+            "Extract high-magnitude spatial clusters from a CalculiX FRD result file. "
+            "Partitions nodal stress or displacement fields into ≤ N clusters, "
+            "reporting centroid, peak magnitude, and node count per cluster. "
+            "Writes results/field_regions.json into the .aieng package."
+        ),
+    )
+    _rt.register_tool(
         "cae.prepare_solver_run",
         _tool_cae_prepare_solver_run,
         description=(
             "Inspect a .aieng package and return a reviewable solver run preflight plan. "
             "Checks for mesh, solver settings, load case, and input deck presence. "
             "No solver is executed; returns requires_approval=true and solver_execution_performed=false."
+        ),
+    )
+    _rt.register_tool(
+        "cae.generate_solver_input",
+        _tool_cae_generate_solver_input,
+        description=(
+            "Generate a runnable CalculiX solver input deck from existing .aieng setup artifacts. "
+            "Preserves mesh from a previously imported source deck and assembles materials, BCs, loads, and step. "
+            "Supports linear static only. Refuses with explicit missing_items if mesh or setup is absent."
         ),
     )
     _rt.register_tool(

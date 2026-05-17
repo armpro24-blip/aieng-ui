@@ -355,6 +355,16 @@ _INTENT_MAP: list[tuple[list[str], str, str]] = [
     ),
     (
         [
+            "extract field regions", "field region extraction", "extract stress clusters",
+            "extract high stress regions", "identify stress concentrations", "find stress hotspots",
+            "field region clusters", "frd region extraction",
+            "提取场区域", "提取应力区域", "识别应力集中", "提取应力聚类",
+        ],
+        "cae.extract_field_regions",
+        "Extract high-magnitude spatial clusters from a CalculiX FRD file and write results/field_regions.json",
+    ),
+    (
+        [
             "prepare solver run", "solver preflight", "run preflight", "check solver readiness",
             "prepare cae run", "cae run preflight", "check simulation readiness",
             "prepare simulation run", "simulation preflight",
@@ -362,6 +372,15 @@ _INTENT_MAP: list[tuple[list[str], str, str]] = [
         ],
         "cae.prepare_solver_run",
         "Inspect .aieng package and return solver run preflight plan (no solver execution)",
+    ),
+    (
+        [
+            "generate solver input", "generate calculix deck", "generate solver deck",
+            "create solver input", "build solver deck", "generate inp",
+            "生成求解器输入", "生成计算输入", "创建求解器输入",
+        ],
+        "cae.generate_solver_input",
+        "Generate a runnable CalculiX solver input deck from existing .aieng setup artifacts",
     ),
     (
         [
