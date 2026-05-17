@@ -28,7 +28,7 @@ correctness claim).
 One command, from a clean Python environment:
 
 ```powershell
-cd C:\Users\RL_Carla\Desktop\workspace_aieng\aieng-ui\backend
+cd /path/to/workspace_aieng\aieng-ui\backend
 python -m pytest -c NUL tests/test_api.py::test_vertical_cae_workflow_end_to_end -v
 ```
 

@@ -24,21 +24,21 @@ Run these in order. If any required check fails, stop and fix before demoing.
 
 ### 2.1 aieng-ui backend tests (required)
 ```powershell
-cd C:\Users\RL_Carla\Desktop\workspace_aieng\aieng-ui\backend
+cd /path/to/workspace_aieng\aieng-ui\backend
 python -m pytest -c NUL tests/test_api.py -v
 ```
 **Expected:** `111 passed, 1 skipped, 2 warnings` (the skip is the real-ccx smoke test when ccx is absent).
 
 ### 2.2 Vertical workflow benchmark (required)
 ```powershell
-cd C:\Users\RL_Carla\Desktop\workspace_aieng\aieng-ui\backend
+cd /path/to/workspace_aieng\aieng-ui\backend
 python -m pytest -c NUL tests/test_api.py::test_vertical_cae_workflow_end_to_end -v
 ```
 **Expected:** `PASSED`.
 
 ### 2.3 Frontend build (required if UI is being shown)
 ```powershell
-cd C:\Users\RL_Carla\Desktop\workspace_aieng\aieng-ui\frontend
+cd /path/to/workspace_aieng\aieng-ui\frontend
 npm install
 npm run build
 ```
@@ -46,14 +46,14 @@ npm run build
 
 ### 2.4 aieng tests (required if evidence/schema code changed)
 ```powershell
-cd C:\Users\RL_Carla\Desktop\workspace_aieng\aieng
+cd /path/to/workspace_aieng\aieng
 python -m pytest -v
 ```
 **Expected:** All tests pass.
 
 ### 2.5 aieng_freecad_mCP runtime MCP tests (required if MCP is being shown)
 ```powershell
-cd C:\Users\RL_Carla\Desktop\workspace_aieng\aieng_freecad_mcp
+cd /path/to/workspace_aieng\aieng_freecad_mcp
 python -m pytest -v
 ```
 **Expected:** All tests pass.
@@ -74,7 +74,7 @@ ccx -h
 
 ### 3.2 Run the real ccx smoke test
 ```powershell
-cd C:\Users\RL_Carla\Desktop\workspace_aieng\aieng-ui\backend
+cd /path/to/workspace_aieng\aieng-ui\backend
 python -m pytest -c NUL tests/test_api.py::test_run_solver_real_ccx_skipped_if_unavailable -v
 ```
 **If ccx is installed:** `PASSED`. The test runs the fixture `minimal_cantilever.inp` through a real ccx process, then asserts `solver_run.json`, `solver_log.txt`, and `outputs/result.frd` exist in the package.

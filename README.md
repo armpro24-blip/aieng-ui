@@ -98,7 +98,7 @@ npm run dev
 
 ```bash
 cd backend
-"C:/Users/RL_Carla/anaconda3/python.exe" -m pytest -c NUL tests/test_api.py -v
+python -m pytest -c NUL tests/test_api.py -v
 ```
 
 A generic end-to-end post-processing smoke test (`test_postprocessing_smoke_metrics_import_and_summary_refresh`) validates the full metrics-import → summary-refresh workflow without solver execution or part-family fixtures.

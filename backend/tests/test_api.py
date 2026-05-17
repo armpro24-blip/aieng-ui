@@ -21,6 +21,10 @@ from app.main import (
     summarize_cae_payload,
 )
 from app import runtime as _rt
+
+# Resolve workspace root relative to this test file
+# test_api.py → backend/tests → backend → aieng-ui → workspace_aieng
+_WORKSPACE_ROOT = Path(__file__).resolve().parents[3]
 from app.providers.freecad.adapter import FreeCADAdapter
 from app.providers.registry import get_provider
 
@@ -1927,8 +1931,8 @@ def test_get_cae_preprocessing_summary_endpoint(tmp_path: Path) -> None:
         platform_root=tmp_path / "platform",
         workspace_root=workspace,
         data_root=tmp_path / "data",
-        aieng_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng"),
-        freecad_mcp_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng_freecad_mcp"),
+        aieng_root=_WORKSPACE_ROOT / "aieng",
+        freecad_mcp_root=_WORKSPACE_ROOT / "aieng_freecad_mcp",
         freecad_home=workspace / "freecad",
         sample_step=workspace / "sample.step",
     )
@@ -1964,8 +1968,8 @@ def test_get_cae_simulation_run_summary_endpoint(tmp_path: Path) -> None:
         platform_root=tmp_path / "platform",
         workspace_root=workspace,
         data_root=tmp_path / "data",
-        aieng_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng"),
-        freecad_mcp_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng_freecad_mcp"),
+        aieng_root=_WORKSPACE_ROOT / "aieng",
+        freecad_mcp_root=_WORKSPACE_ROOT / "aieng_freecad_mcp",
         freecad_home=workspace / "freecad",
         sample_step=workspace / "sample.step",
     )
@@ -2006,8 +2010,8 @@ def test_get_cae_preprocessing_summary_missing_package_returns_404(tmp_path: Pat
         platform_root=tmp_path / "platform",
         workspace_root=workspace,
         data_root=tmp_path / "data",
-        aieng_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng"),
-        freecad_mcp_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng_freecad_mcp"),
+        aieng_root=_WORKSPACE_ROOT / "aieng",
+        freecad_mcp_root=_WORKSPACE_ROOT / "aieng_freecad_mcp",
         freecad_home=workspace / "freecad",
         sample_step=workspace / "sample.step",
     )
@@ -2028,8 +2032,8 @@ def test_get_cae_simulation_run_summary_missing_package_returns_404(tmp_path: Pa
         platform_root=tmp_path / "platform",
         workspace_root=workspace,
         data_root=tmp_path / "data",
-        aieng_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng"),
-        freecad_mcp_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng_freecad_mcp"),
+        aieng_root=_WORKSPACE_ROOT / "aieng",
+        freecad_mcp_root=_WORKSPACE_ROOT / "aieng_freecad_mcp",
         freecad_home=workspace / "freecad",
         sample_step=workspace / "sample.step",
     )
@@ -2052,8 +2056,8 @@ def _make_patch_settings(tmp_path: Path):
         platform_root=tmp_path / "platform",
         workspace_root=workspace,
         data_root=tmp_path / "data",
-        aieng_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng"),
-        freecad_mcp_root=Path(r"C:\Users\RL_Carla\Desktop\workspace_aieng\aieng_freecad_mcp"),
+        aieng_root=_WORKSPACE_ROOT / "aieng",
+        freecad_mcp_root=_WORKSPACE_ROOT / "aieng_freecad_mcp",
         freecad_home=workspace / "freecad",
         sample_step=workspace / "sample.step",
     )
