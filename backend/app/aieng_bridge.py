@@ -450,6 +450,126 @@ def validate_package(
                 pass
 
 
+def write_completeness_report(
+    package_path: str | Path,
+    *,
+    aieng_root: str | Path,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Write a completeness report into a .aieng package.
+
+    Imports ``aieng.validation.completeness_writer.write_completeness_report_package``
+    from ``aieng_root/src``. Raises RuntimeError if the import or write fails.
+
+    Args:
+        package_path: Path to the .aieng package.
+        aieng_root: Root of the aieng repo checkout.
+        overwrite: Whether to overwrite an existing completeness report.
+
+    Returns:
+        Dict with status, package_path, and completeness report artifact.
+    """
+    pkg = Path(package_path)
+    if not pkg.exists():
+        raise FileNotFoundError(f"Package not found: {pkg}")
+
+    aieng_src = Path(aieng_root) / "src"
+    if not aieng_src.exists():
+        raise RuntimeError(f"aieng src not found at {aieng_src}")
+
+    injected = False
+    try:
+        candidate = str(aieng_src)
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            injected = True
+        from aieng.validation.completeness_writer import write_completeness_report_package  # type: ignore[import]
+
+        result_path = write_completeness_report_package(pkg, overwrite=overwrite)
+        return {
+            "status": "ok",
+            "package_path": str(result_path),
+            "artifacts": [
+                {
+                    "path": "validation/completeness_report.json",
+                    "kind": "completeness_report",
+                    "role": "package_completeness_assessment",
+                }
+            ],
+        }
+    except (FileNotFoundError, ValueError):
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to write completeness report: {exc}") from exc
+    finally:
+        if injected:
+            try:
+                sys.path.remove(candidate)
+            except ValueError:
+                pass
+
+
+def update_validation_status(
+    package_path: str | Path,
+    *,
+    aieng_root: str | Path,
+    overwrite: bool = False,
+    extra_status: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Update validation status inside a .aieng package.
+
+    Imports ``aieng.validation.status_writer.update_validation_status_package``
+    from ``aieng_root/src``. Raises RuntimeError if the import or write fails.
+
+    Args:
+        package_path: Path to the .aieng package.
+        aieng_root: Root of the aieng repo checkout.
+        overwrite: Whether to overwrite an existing validation status.
+        extra_status: Optional extra status fields to merge.
+
+    Returns:
+        Dict with status, package_path, and validation status artifact.
+    """
+    pkg = Path(package_path)
+    if not pkg.exists():
+        raise FileNotFoundError(f"Package not found: {pkg}")
+
+    aieng_src = Path(aieng_root) / "src"
+    if not aieng_src.exists():
+        raise RuntimeError(f"aieng src not found at {aieng_src}")
+
+    injected = False
+    try:
+        candidate = str(aieng_src)
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            injected = True
+        from aieng.validation.status_writer import update_validation_status_package  # type: ignore[import]
+
+        result_path = update_validation_status_package(pkg, overwrite=overwrite, extra_status=extra_status)
+        return {
+            "status": "ok",
+            "package_path": str(result_path),
+            "artifacts": [
+                {
+                    "path": "validation/status.yaml",
+                    "kind": "validation_status",
+                    "role": "package_validation_status",
+                }
+            ],
+        }
+    except (FileNotFoundError, ValueError):
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to update validation status: {exc}") from exc
+    finally:
+        if injected:
+            try:
+                sys.path.remove(candidate)
+            except ValueError:
+                pass
+
+
 def convert_source_to_package(
     source_path: str | Path,
     out_path: str | Path,

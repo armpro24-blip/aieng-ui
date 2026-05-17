@@ -408,6 +408,24 @@ _INTENT_MAP: list[tuple[list[str], str, str]] = [
         "aieng.validate",
         "Validate a .aieng package against AIENG schemas and rules",
     ),
+    (
+        [
+            "write completeness report", "completeness report", "generate completeness report",
+            "package completeness", "missingness report", "what is missing",
+            "完整性报告", "缺失报告", "生成完整性报告",
+        ],
+        "aieng.write_completeness_report",
+        "Write a completeness/missingness report into a .aieng package",
+    ),
+    (
+        [
+            "update validation status", "write validation status", "validation status",
+            "package validation status",
+            "验证状态", "更新验证状态", "写入验证状态",
+        ],
+        "aieng.update_validation_status",
+        "Update validation status (status.yaml) inside a .aieng package",
+    ),
 ]
 
 

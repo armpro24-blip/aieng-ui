@@ -3046,6 +3046,158 @@ def test_runtime_plan_selects_convert_intent(tmp_path: Path) -> None:
         assert plan[0]["name"] == "aieng.convert"
 
 
+def test_aieng_write_completeness_report_success(tmp_path: Path) -> None:
+    """aieng.write_completeness_report creates validation/completeness_report.json."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("completeness"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "completeness.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "completeness.aieng"
+    save_project(settings, project)
+
+    original_build = _rt.build_plan
+    _rt.build_plan = lambda msg, pid: [
+        {"name": "aieng.write_completeness_report", "description": "completeness", "input": {"project_id": pid}}
+    ]
+    try:
+        resp = client.post("/api/runtime/runs", json={
+            "message": "write completeness report",
+            "project_id": project_id,
+            "tool_input": {"project_id": project_id},
+        })
+    finally:
+        _rt.build_plan = original_build
+
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "completed"
+    result = run["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert any(a["path"] == "validation/completeness_report.json" for a in result["artifacts"])
+
+
+def test_aieng_write_completeness_report_missing_package_returns_error(tmp_path: Path) -> None:
+    """aieng.write_completeness_report returns error when package is missing."""
+    from app.main import create_app, default_project, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("completeness-missing"))
+    project_id = project["id"]
+
+    original_build = _rt.build_plan
+    _rt.build_plan = lambda msg, pid: [
+        {"name": "aieng.write_completeness_report", "description": "completeness", "input": {"project_id": pid}}
+    ]
+    try:
+        resp = client.post("/api/runtime/runs", json={
+            "message": "write completeness report",
+            "project_id": project_id,
+            "tool_input": {"project_id": project_id},
+        })
+    finally:
+        _rt.build_plan = original_build
+
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["ok"] is False
+    assert result["code"] == "missing_package_path"
+
+
+def test_aieng_update_validation_status_success(tmp_path: Path) -> None:
+    """aieng.update_validation_status creates validation/status.yaml."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("validation-status"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "validation_status.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "validation_status.aieng"
+    save_project(settings, project)
+
+    original_build = _rt.build_plan
+    _rt.build_plan = lambda msg, pid: [
+        {"name": "aieng.update_validation_status", "description": "validation status", "input": {"project_id": pid}}
+    ]
+    try:
+        resp = client.post("/api/runtime/runs", json={
+            "message": "update validation status",
+            "project_id": project_id,
+            "tool_input": {"project_id": project_id},
+        })
+    finally:
+        _rt.build_plan = original_build
+
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "completed"
+    result = run["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert any(a["path"] == "validation/status.yaml" for a in result["artifacts"])
+
+
+def test_aieng_update_validation_status_missing_package_returns_error(tmp_path: Path) -> None:
+    """aieng.update_validation_status returns error when package is missing."""
+    from app.main import create_app, default_project, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("validation-missing"))
+    project_id = project["id"]
+
+    original_build = _rt.build_plan
+    _rt.build_plan = lambda msg, pid: [
+        {"name": "aieng.update_validation_status", "description": "validation status", "input": {"project_id": pid}}
+    ]
+    try:
+        resp = client.post("/api/runtime/runs", json={
+            "message": "update validation status",
+            "project_id": project_id,
+            "tool_input": {"project_id": project_id},
+        })
+    finally:
+        _rt.build_plan = original_build
+
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["ok"] is False
+    assert result["code"] == "missing_package_path"
+
+
+def test_runtime_plan_selects_completeness_intent(tmp_path: Path) -> None:
+    from app.runtime import build_plan
+    for msg in ["write completeness report", "missingness report", "what is missing"]:
+        plan = build_plan(msg, None)
+        names = [s["name"] for s in plan]
+        assert "aieng.write_completeness_report" in names, f"Expected aieng.write_completeness_report in plan for {msg!r}, got {names!r}"
+
+
+def test_runtime_plan_selects_validation_status_intent(tmp_path: Path) -> None:
+    from app.runtime import build_plan
+    for msg in ["write validation status", "update validation status yaml"]:
+        plan = build_plan(msg, None)
+        names = [s["name"] for s in plan]
+        assert "aieng.update_validation_status" in names, f"Expected aieng.update_validation_status in plan for {msg!r}, got {names!r}"
+
+
 def test_aieng_write_evidence_scaffold_success(tmp_path: Path) -> None:
     """aieng.write_evidence_scaffold creates evidence_index.json and claim_map.json."""
     from app.main import create_app, default_project, project_dir, save_project
