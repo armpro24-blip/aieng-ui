@@ -564,6 +564,15 @@ def write_field_summary(
                 {"path": "results/field_summary.md", "kind": "markdown", "role": "llm_field_summary"},
             ],
         }
+    except ModuleNotFoundError as exc:
+        if "cae_field_summary" in str(exc):
+            return {
+                "status": "skipped",
+                "package_path": str(pkg),
+                "reason": "aieng.cae_field_summary is not available (removed in core)",
+                "artifacts": [],
+            }
+        raise
     except (FileNotFoundError, FileExistsError, ValueError):
         raise
     except Exception as exc:

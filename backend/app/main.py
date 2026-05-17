@@ -3292,6 +3292,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "message": str(exc),
             }
 
+        field_summary_status = "not_requested"
         refreshed_artifacts: list[dict[str, Any]] = []
         warnings = list(result.get("warnings", []))
         if refresh_field_summary:
@@ -3302,7 +3303,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     overwrite=True,
                 )
                 refreshed_artifacts = summary_result.get("artifacts", [])
+                field_summary_status = summary_result.get("status", "ok")
+                if field_summary_status == "skipped":
+                    warnings.append(
+                        f"Field summary skipped: {summary_result.get('reason', 'aieng.cae_field_summary unavailable')}"
+                    )
             except Exception as exc:
+                field_summary_status = "error"
                 warnings.append(
                     f"Field regions were extracted, but field summary refresh failed: {type(exc).__name__}: {exc}"
                 )
@@ -3324,6 +3331,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 }
             ],
             "refreshed_artifacts": refreshed_artifacts,
+            "field_summary_status": field_summary_status,
         }
 
     def _tool_cae_prepare_solver_run(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:

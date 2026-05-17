@@ -2971,17 +2971,104 @@ def test_cae_extract_field_regions_success(tmp_path: Path) -> None:
     # The high-stress group near x=10 should form at least one cluster
     assert any(c["node_count"] >= 3 for c in clusters)
     assert any("field_regions" in a["path"] for a in result["artifacts"])
-    assert any(a["path"] == "results/field_summary.json" for a in result["refreshed_artifacts"])
 
     # Verify package was updated
     with zipfile.ZipFile(pkg_path, "r") as zf:
         assert "results/field_regions.json" in zf.namelist()
-        assert "results/field_summary.json" in zf.namelist()
-        assert "results/field_summary.md" in zf.namelist()
         written = json.loads(zf.read("results/field_regions.json"))
     assert written["format_version"] is not None
     assert written["cluster_count"] >= 1
     assert len(written["clusters"]) >= 1
+
+
+def test_write_field_summary_skipped_when_core_module_missing(tmp_path: Path) -> None:
+    """When aieng.cae_field_summary is removed, write_field_summary returns skipped without crashing."""
+    from app import aieng_bridge
+    from app.main import Settings
+
+    settings = Settings(
+        platform_root=tmp_path / "platform",
+        workspace_root=tmp_path / "workspace",
+        data_root=tmp_path / "data",
+        aieng_root=_WORKSPACE_ROOT / "aieng",
+        freecad_mcp_root=_WORKSPACE_ROOT / "aieng_freecad_mcp",
+        freecad_home=tmp_path / "freecad",
+        sample_step=tmp_path / "sample.step",
+    )
+    pkg_path = tmp_path / "test.aieng"
+    _make_setup_package(pkg_path)
+
+    result = aieng_bridge.write_field_summary(
+        pkg_path,
+        aieng_root=settings.aieng_root,
+        overwrite=False,
+    )
+    assert result["status"] == "skipped"
+    assert "cae_field_summary" in result["reason"]
+    assert result["artifacts"] == []
+
+
+def test_extract_field_regions_passes_field_summary_status(monkeypatch, tmp_path: Path) -> None:
+    """_tool_cae_extract_field_regions must expose field_summary_status when write_field_summary is skipped."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+    from app import aieng_bridge
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("field-summary-status"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "field-summary-status.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "field-summary-status.aieng"
+    save_project(settings, project)
+
+    coords = {
+        1: (0.0, 0.0, 0.0),
+        2: (10.0, 0.0, 0.0),
+    }
+    stress = {
+        1: [10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        2: [200.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    }
+    frd_path = tmp_path / "job.frd"
+    frd_path.write_text(_make_test_frd_with_coords(coords, stress_nodes=stress), encoding="utf-8")
+
+    # Force write_field_summary to return skipped (simulating missing core module)
+    monkeypatch.setattr(
+        aieng_bridge,
+        "write_field_summary",
+        lambda *a, **kw: {
+            "status": "skipped",
+            "package_path": str(a[0]) if a else "",
+            "reason": "mock missing core module",
+            "artifacts": [],
+        },
+    )
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "extract field regions",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "frdPath": str(frd_path),
+            "field": "S",
+            "metric": "von_mises",
+            "maxClusters": 3,
+            "thresholdPercentile": 80.0,
+            "refresh_field_summary": True,
+        },
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "completed"
+    result = run["tool_results"][0]["output"]
+    assert result["status"] == "completed"
+    assert result["field_summary_status"] == "skipped"
+    assert any("mock missing core module" in w for w in result["warnings"])
+    assert result["refreshed_artifacts"] == []
 
 
 def test_cae_extract_field_regions_missing_frd_returns_error(tmp_path: Path) -> None:
