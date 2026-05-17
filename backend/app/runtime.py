@@ -277,9 +277,18 @@ _INTENT_MAP: list[tuple[list[str], str, str]] = [
         "Re-validate package and refresh semantic state",
     ),
     (
-        ["preview", "生成预览", "convert", "glb", "stl", "viewer", "预览"],
+        ["preview", "生成预览", "glb", "stl", "viewer", "预览"],
         "aieng.generate_preview",
         "Generate 3-D web preview asset",
+    ),
+    (
+        [
+            "convert fcstd", "convert step", "convert to aieng",
+            "import step to aieng", "fcstd to aieng", "step to aieng",
+            "转换step", "转换fcstd", "导入step",
+        ],
+        "aieng.convert",
+        "Convert a CAD source file (.FCStd or .step) to a .aieng package",
     ),
     (
         ["audit", "log", "审计", "日志"],

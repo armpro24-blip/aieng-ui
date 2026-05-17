@@ -450,6 +450,103 @@ def validate_package(
                 pass
 
 
+def convert_source_to_package(
+    source_path: str | Path,
+    out_path: str | Path,
+    *,
+    aieng_root: str | Path,
+    model_id: str | None = None,
+    converter_id: str | None = None,
+    overwrite: bool = False,
+    runtime_mode: str = "auto",
+) -> dict[str, Any]:
+    """Convert a CAD source file (.FCStd or .step) to a .aieng package.
+
+    Imports ``aieng.converters.cli_runners.convert_source`` and
+    ``aieng.geometry.step_importer.import_step_package`` from
+    ``aieng_root/src``. Raises RuntimeError if the import or conversion fails.
+
+    Args:
+        source_path: Path to the source CAD file (.FCStd or .step/.stp).
+        out_path: Path for the output .aieng package.
+        aieng_root: Root of the aieng repo checkout.
+        model_id: Optional model ID; inferred from out_path stem if omitted.
+        converter_id: Optional converter ID for FCStd sources.
+        overwrite: Whether to overwrite an existing output package.
+        runtime_mode: Runtime mode for FCStd conversion ("auto", "offline", "runtime").
+
+    Returns:
+        Dict with status, out_path, converter_id, and source_type.
+    """
+    src = Path(source_path)
+    out = Path(out_path)
+
+    if not src.exists():
+        raise FileNotFoundError(f"Source file not found: {src}")
+    if not src.is_file():
+        raise ValueError(f"Source path is not a file: {src}")
+
+    aieng_src = Path(aieng_root) / "src"
+    if not aieng_src.exists():
+        raise RuntimeError(f"aieng src not found at {aieng_src}")
+
+    injected = False
+    try:
+        candidate = str(aieng_src)
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            injected = True
+
+        if model_id is None:
+            from aieng.package import model_id_from_package_path  # type: ignore[import]
+
+            model_id = model_id_from_package_path(out)
+
+        suffix = src.suffix.lower()
+        if suffix in {".fcstd"}:
+            from aieng.converters.cli_runners import convert_source  # type: ignore[import]
+
+            result_path = convert_source(
+                source_path=src,
+                out=out,
+                model_id=model_id,
+                converter_id=converter_id,
+                overwrite=overwrite,
+                runtime_mode=runtime_mode,
+            )
+            return {
+                "status": "ok",
+                "out_path": str(result_path),
+                "converter_id": converter_id or "freecad_reference",
+                "source_type": "fcstd",
+            }
+        elif suffix in {".step", ".stp"}:
+            from aieng.geometry.step_importer import import_step_package  # type: ignore[import]
+
+            result_path = import_step_package(src, out, overwrite=overwrite)
+            return {
+                "status": "ok",
+                "out_path": str(result_path),
+                "converter_id": converter_id or "step_importer",
+                "source_type": "step",
+            }
+        else:
+            raise ValueError(
+                f"Unsupported source file extension: {suffix!r}. "
+                f"Supported: .FCStd, .step, .stp"
+            )
+    except (FileNotFoundError, ValueError):
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to convert source: {exc}") from exc
+    finally:
+        if injected:
+            try:
+                sys.path.remove(candidate)
+            except ValueError:
+                pass
+
+
 def write_evidence_scaffold(
     package_path: str | Path,
     *,

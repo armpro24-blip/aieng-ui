@@ -2914,6 +2914,138 @@ def test_aieng_validate_missing_package_returns_error(tmp_path: Path) -> None:
     assert result["code"] == "missing_package_path"
 
 
+def test_aieng_convert_step_success_via_mocked_bridge(monkeypatch, tmp_path: Path) -> None:
+    """aieng.convert returns out_path and source_type on successful conversion."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("convert-test"))
+    project_id = project["id"]
+    step_path = project_dir(settings, project_id) / "source" / "test_part.step"
+    step_path.parent.mkdir(parents=True, exist_ok=True)
+    step_path.write_text("dummy step content")
+    project["source_step"] = "source/test_part.step"
+    save_project(settings, project)
+
+    def _mock_convert(*a, **kw):
+        return {
+            "status": "ok",
+            "out_path": str(project_dir(settings, project_id) / "packages" / "test_part.aieng"),
+            "converter_id": "step_importer",
+            "source_type": "step",
+        }
+
+    monkeypatch.setattr("app.aieng_bridge.convert_source_to_package", _mock_convert)
+
+    original_build = _rt.build_plan
+    _rt.build_plan = lambda msg, pid: [
+        {"name": "aieng.convert", "description": "convert", "input": {"project_id": pid}}
+    ]
+    try:
+        resp = client.post("/api/runtime/runs", json={
+            "message": "convert step to aieng",
+            "project_id": project_id,
+            "tool_input": {"project_id": project_id},
+        })
+    finally:
+        _rt.build_plan = original_build
+
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "completed"
+    result = run["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert result["out_path"].endswith("test_part.aieng")
+    assert result["source_type"] == "step"
+    assert result["converter_id"] == "step_importer"
+
+
+def test_aieng_convert_missing_source_returns_error(tmp_path: Path) -> None:
+    """aieng.convert returns error when no source path can be resolved."""
+    from app.main import create_app, default_project, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("convert-missing"))
+    project_id = project["id"]
+
+    original_build = _rt.build_plan
+    _rt.build_plan = lambda msg, pid: [
+        {"name": "aieng.convert", "description": "convert", "input": {"project_id": pid}}
+    ]
+    try:
+        resp = client.post("/api/runtime/runs", json={
+            "message": "convert step to aieng",
+            "project_id": project_id,
+            "tool_input": {"project_id": project_id},
+        })
+    finally:
+        _rt.build_plan = original_build
+
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["ok"] is False
+    assert result["code"] == "missing_source_path"
+
+
+def test_aieng_convert_bridge_exception_produces_tool_failed(monkeypatch, tmp_path: Path) -> None:
+    """aieng.convert propagates bridge RuntimeError as tool_failed."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("convert-fail"))
+    project_id = project["id"]
+    step_path = project_dir(settings, project_id) / "source" / "fail.step"
+    step_path.parent.mkdir(parents=True, exist_ok=True)
+    step_path.write_text("dummy")
+    project["source_step"] = "source/fail.step"
+    save_project(settings, project)
+
+    def _fail(*a, **kw):
+        raise Exception("converter exploded")
+
+    monkeypatch.setattr("app.aieng_bridge.convert_source_to_package", _fail)
+
+    original_build = _rt.build_plan
+    _rt.build_plan = lambda msg, pid: [
+        {"name": "aieng.convert", "description": "convert", "input": {"project_id": pid}}
+    ]
+    try:
+        resp = client.post("/api/runtime/runs", json={
+            "message": "convert step to aieng",
+            "project_id": project_id,
+            "tool_input": {"project_id": project_id},
+        })
+    finally:
+        _rt.build_plan = original_build
+
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["status"] == "failed"
+    event_types = [e["type"] for e in data["events"]]
+    assert "tool_failed" in event_types
+    assert "run_failed" in event_types
+
+
+def test_runtime_plan_selects_convert_intent(tmp_path: Path) -> None:
+    from app.runtime import build_plan
+    for msg in ["convert step to aieng", "convert fcstd file", "import step to aieng"]:
+        plan = build_plan(msg, None)
+        assert len(plan) == 1, f"Expected 1 step for {msg!r}, got {plan!r}"
+        assert plan[0]["name"] == "aieng.convert"
+
+
 def test_aieng_write_evidence_scaffold_success(tmp_path: Path) -> None:
     """aieng.write_evidence_scaffold creates evidence_index.json and claim_map.json."""
     from app.main import create_app, default_project, project_dir, save_project

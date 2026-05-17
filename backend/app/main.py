@@ -3420,6 +3420,108 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "counts": result.get("counts", {}),
         }
 
+    def _tool_aieng_convert(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import aieng_bridge
+        from pathlib import Path as _Path
+
+        source_path_str: str | None = inp.get("sourcePath") or inp.get("source_path")
+        out_path_str: str | None = inp.get("outPath") or inp.get("out_path")
+        project_id: str | None = inp.get("project_id")
+        converter_id: str | None = inp.get("converterId") or inp.get("converter_id")
+        overwrite: bool = bool(inp.get("overwrite", False))
+        runtime_mode: str = inp.get("runtimeMode") or inp.get("runtime_mode") or "auto"
+        model_id: str | None = inp.get("modelId") or inp.get("model_id")
+
+        # Resolve source_path from project.source_step if not provided
+        if not source_path_str and project_id:
+            proj = get_project(active_settings, project_id)
+            src = resolve_project_path(active_settings, project_id, proj.get("source_step"))
+            if src is not None and src.exists():
+                source_path_str = str(src)
+
+        if not source_path_str:
+            return {
+                "ok": False,
+                "tool": "aieng.convert",
+                "status": "error",
+                "code": "missing_source_path",
+                "message": "No source path provided and no project source_step could be resolved.",
+            }
+
+        source_path = _Path(source_path_str)
+        if not source_path.exists():
+            return {
+                "ok": False,
+                "tool": "aieng.convert",
+                "status": "error",
+                "code": "source_not_found",
+                "message": f"Source file not found: {source_path_str}",
+            }
+
+        # Resolve out_path: default to project packages dir
+        if not out_path_str and project_id:
+            proj_name = _Path(source_path_str).stem
+            out_path_str = str(project_dir(active_settings, project_id) / "packages" / f"{proj_name}.aieng")
+
+        if not out_path_str:
+            return {
+                "ok": False,
+                "tool": "aieng.convert",
+                "status": "error",
+                "code": "missing_out_path",
+                "message": "No output path provided and could not infer one from project.",
+            }
+
+        out_path = _Path(out_path_str)
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+
+        try:
+            result = aieng_bridge.convert_source_to_package(
+                source_path,
+                out_path,
+                aieng_root=active_settings.aieng_root,
+                model_id=model_id,
+                converter_id=converter_id,
+                overwrite=overwrite,
+                runtime_mode=runtime_mode,
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            return {
+                "ok": False,
+                "tool": "aieng.convert",
+                "status": "error",
+                "code": "conversion_failed",
+                "message": str(exc),
+            }
+        except RuntimeError as exc:
+            return {
+                "ok": False,
+                "tool": "aieng.convert",
+                "status": "error",
+                "code": "bridge_error",
+                "message": str(exc),
+            }
+
+        # Update project aieng_file if project_id is available
+        if project_id:
+            try:
+                proj = get_project(active_settings, project_id)
+                rel_out = project_relpath(active_settings, project_id, out_path)
+                proj["aieng_file"] = rel_out
+                proj["status"] = "converted"
+                save_project(active_settings, proj)
+            except Exception:
+                pass  # Don't fail the tool if project update fails
+
+        return {
+            "ok": True,
+            "tool": "aieng.convert",
+            "status": "completed",
+            "out_path": result.get("out_path"),
+            "source_type": result.get("source_type"),
+            "converter_id": result.get("converter_id"),
+        }
+
     def _tool_aieng_write_evidence_scaffold(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
         from . import aieng_bridge
         from pathlib import Path as _Path
@@ -3695,6 +3797,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         description=(
             "Validate a .aieng package against AIENG schemas and rules. "
             "Returns PASS/WARN/FAIL messages and an overall validation_ok boolean."
+        ),
+    )
+    _rt.register_tool(
+        "aieng.convert",
+        _tool_aieng_convert,
+        description=(
+            "Convert a CAD source file (.FCStd or .step/.stp) to a .aieng package. "
+            "Supports FreeCAD FCStd offline parsing and STEP evidence import. "
+            "Automatically updates project aieng_file on success."
         ),
     )
     _rt.register_tool(
