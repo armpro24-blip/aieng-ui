@@ -32,6 +32,40 @@ def _remove_path(candidate: str, injected: bool) -> None:
             pass
 
 
+def _clear_stale_aieng_modules(expected_root: Path) -> None:
+    """Drop cached ``aieng[.submodule]`` entries that were loaded from a
+    different root than ``expected_root``.
+
+    Pytest test pollution: when one test imports ``aieng`` via an
+    injected ``aieng_root`` that points at a tmp_path stub, the package
+    is cached in ``sys.modules`` with that stub's ``__path__``. A later
+    test that injects the real ``aieng/src`` path then fails on
+    ``from aieng.benchmarking.providers import ...`` because Python
+    reuses the cached package and looks for submodules in the stub
+    path. Purging the stale cache before each ``_inject_path`` call
+    forces a fresh resolution.
+    """
+    try:
+        expected_resolved = expected_root.resolve()
+    except OSError:
+        return
+    stale: list[str] = []
+    for name, module in list(sys.modules.items()):
+        if name != "aieng" and not name.startswith("aieng."):
+            continue
+        module_file = getattr(module, "__file__", None)
+        if module_file is None:
+            continue
+        try:
+            Path(module_file).resolve().relative_to(expected_resolved)
+        except ValueError:
+            stale.append(name)
+        except OSError:
+            stale.append(name)
+    for name in stale:
+        sys.modules.pop(name, None)
+
+
 def _coerce_json_object(text: str) -> dict[str, Any]:
     stripped = text.strip()
     if stripped.startswith("```"):
@@ -52,6 +86,7 @@ def _coerce_json_object(text: str) -> dict[str, Any]:
 
 def _build_provider(settings: Any, llm_config: dict[str, Any]) -> Any:
     src = settings.aieng_root / "src"
+    _clear_stale_aieng_modules(src)
     candidate, injected = _inject_path(src)
     try:
         from aieng.benchmarking.providers import ProviderConfig, build_provider
@@ -323,6 +358,7 @@ def test_llm_provider(
 
     # Step 1: Check API key presence
     src = settings.aieng_root / "src"
+    _clear_stale_aieng_modules(src)
     candidate, injected = _inject_path(src)
     try:
         from aieng.benchmarking.providers import ProviderConfig
