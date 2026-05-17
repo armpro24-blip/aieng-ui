@@ -1915,8 +1915,25 @@ def package_summary(settings: Settings, project_id: str) -> dict[str, Any]:
         if package_path and package_path.exists():
             _has_frd = _resolve_frd_in_package(package_path) is not None
 
+        _available_fields = list(_cae.get("available_fields") or [])
+        _real_field_cache: dict[str, dict[str, Any]] = {}
+        if _has_frd and package_path and package_path.exists():
+            for candidate in ("stress", "displacement"):
+                try:
+                    real_field = _extract_frd_field_data(package_path, candidate, settings.aieng_root)
+                except Exception:
+                    real_field = None
+                if real_field is not None:
+                    _real_field_cache[candidate] = real_field
+                    if candidate not in _available_fields:
+                        _available_fields.append(candidate)
+        _cae["available_fields"] = _available_fields
+        if _has_frd:
+            _cae["present"] = True
+            _cae["results_available"] = True
+
         _solver_fields: list[dict[str, Any]] = []
-        for f in (_cae.get("available_fields") or []):
+        for f in _available_fields:
             _meta = _field_defaults.get(f, {"min_value": 0.0, "max_value": 1.0, "unit": ""})
             _field_entry: dict[str, Any] = {
                 "field_name": f,
@@ -1929,7 +1946,9 @@ def package_summary(settings: Settings, project_id: str) -> dict[str, Any]:
             # legend is accurate before the first descriptor fetch.
             if _has_frd:
                 try:
-                    _real = _extract_frd_field_data(package_path, f, settings.aieng_root)
+                    _real = _real_field_cache.get(f)
+                    if _real is None and package_path and package_path.exists():
+                        _real = _extract_frd_field_data(package_path, f, settings.aieng_root)
                     if _real is not None:
                         _field_entry["min_value"] = _real["min_value"]
                         _field_entry["max_value"] = _real["max_value"]

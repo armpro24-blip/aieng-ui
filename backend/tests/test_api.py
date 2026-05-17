@@ -471,6 +471,39 @@ def test_package_summary_solver_fields_reflect_frd_presence(monkeypatch, tmp_pat
     assert stress_field["max_value"] == 200.0
 
 
+def test_package_summary_discovers_frd_fields_without_cae_setup(monkeypatch, tmp_path: Path) -> None:
+    """A package with solver output but no setup constraints still exposes renderable fields."""
+    settings = _make_patch_settings(tmp_path)
+    monkeypatch.setattr("app.main.resolve_provider_bundle", lambda *a, **k: None)
+    monkeypatch.setattr("app.main.runtime_status", lambda s: {"provider": "freecad", "ready": False})
+
+    project = save_project(settings, default_project("frd-only"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "packages" / "frd-only.aieng"
+    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+
+    coords = {1: (0.0, 0.0, 0.0), 2: (1.0, 0.0, 0.0)}
+    stress = {1: [25.0, 0.0, 0.0, 0.0, 0.0, 0.0], 2: [75.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+    frd_text = _make_test_frd_with_coords(coords, stress_nodes=stress)
+
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "frd-only", "resources": {}}))
+        zf.writestr("simulation/runs/run_001/outputs/result.frd", frd_text)
+
+    project["aieng_file"] = "packages/frd-only.aieng"
+    save_project(settings, project)
+
+    summary = package_summary(settings, project_id)
+
+    assert summary["cae"]["present"] is True
+    assert summary["cae"]["results_available"] is True
+    assert "stress" in summary["cae"]["available_fields"]
+    stress_field = next(sf for sf in summary["cae"]["solver_fields"] if sf["field_name"] == "stress")
+    assert stress_field["format"] == "vertex_json"
+    assert stress_field["min_value"] == 25.0
+    assert stress_field["max_value"] == 75.0
+
+
 def test_cae_artifacts_endpoint_returns_detection_result(monkeypatch, tmp_path: Path) -> None:
     settings = Settings(
         platform_root=tmp_path / "platform",
