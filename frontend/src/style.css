@@ -331,13 +331,6 @@ button:disabled {
   margin: 0;
 }
 
-.llm-priority-card {
-  border-color: rgba(45, 212, 191, 0.28);
-  background:
-    radial-gradient(circle at top right, rgba(20, 184, 166, 0.14), transparent 32%),
-    linear-gradient(180deg, rgba(15, 31, 43, 0.96), rgba(13, 22, 39, 0.96));
-}
-
 .llm-readiness-pill {
   align-self: flex-start;
   padding: 8px 12px;
@@ -391,15 +384,6 @@ button:disabled {
 
 .llm-summary-note {
   margin-top: 2px;
-}
-
-.llm-primary-actions {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-}
-
-.llm-primary-actions button {
-  min-width: 0;
 }
 
 .llm-inline-note {
@@ -1057,7 +1041,7 @@ input[type="file"] {
 
 .agent-chat-actions {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(4, minmax(0, 1fr));
   gap: 8px;
 }
 
@@ -1422,6 +1406,10 @@ input[type="file"] {
   border-color: rgba(20, 184, 166, 0.28);
 }
 
+.agent-console-card {
+  border-color: rgba(20, 184, 166, 0.32);
+}
+
 .capability-toolbar {
   display: grid;
   grid-template-columns: minmax(130px, 0.35fr) minmax(0, 1fr);
@@ -1624,8 +1612,7 @@ input[type="file"] {
     grid-template-columns: 1fr;
   }
 
-  .agent-chat-actions,
-  .llm-primary-actions {
+  .agent-chat-actions {
     grid-template-columns: 1fr;
   }
 }

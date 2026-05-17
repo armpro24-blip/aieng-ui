@@ -273,6 +273,11 @@ def llm_agent_plan(
     parsed = _coerce_json_object(raw)
     raw_steps = parsed.get("steps") if isinstance(parsed.get("steps"), list) else []
     tool_set = _tool_names(runtime_tools)
+    mcp_tool_names = MCP_BRIDGE_TOOLS | {
+        str(cap.get("name"))
+        for cap in capabilities
+        if str(cap.get("source") or "").lower().endswith("mcp")
+    }
     steps: list[dict[str, Any]] = []
     warnings = [str(item) for item in parsed.get("warnings") or []]
     base_input = {"project_id": project_id} if project_id else {}
@@ -289,7 +294,7 @@ def llm_agent_plan(
         steps.append(
             _step(
                 str(item.get("id") or f"step_{index + 1}"),
-                "tool",
+                "mcp_tool" if tool_name in mcp_tool_names else "tool",
                 tool_name,
                 str(item.get("description") or tool_name),
                 merged,

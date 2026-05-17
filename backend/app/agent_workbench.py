@@ -362,7 +362,17 @@ def preview_capability(settings: Any, payload: dict[str, Any]) -> dict[str, Any]
     inputs = payload.get("inputs") if isinstance(payload.get("inputs"), dict) else {}
     approved = bool(payload.get("approved") or payload.get("approval_granted"))
     caps = list_capabilities(settings)
-    cap = next((item for item in caps if item["name"] == name), None)
+    matches = [item for item in caps if item["name"] == name]
+    cap = next(
+        (
+            item for item in matches
+            if item.get("mutates_cad")
+            or item.get("mutates_package")
+            or item.get("may_update_claim_map")
+            or item.get("source") == "freecad-mcp"
+        ),
+        matches[0] if matches else None,
+    )
     if cap is None:
         return {
             "status": "rejected",

@@ -598,6 +598,39 @@ def _generate_cae_simulation_run_summary(settings: Settings, package_path: Path)
                 pass
 
 
+def _load_freecad_mcp_registry_entries(settings: Settings) -> list[dict[str, Any]]:
+    """Load freecad-mcp registry metadata without requiring an installed package."""
+    mcp_src = settings.freecad_mcp_root / "src"
+    if not mcp_src.exists():
+        return []
+    injected = False
+    candidate = str(mcp_src)
+    try:
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            injected = True
+        for module_name in ("freecad_mcp.tool_registry", "freecad_mcp"):
+            module = sys.modules.get(module_name)
+            module_file = getattr(module, "__file__", None)
+            if module_file is None:
+                continue
+            try:
+                Path(module_file).resolve().relative_to(mcp_src.resolve())
+            except ValueError:
+                sys.modules.pop(module_name, None)
+        from freecad_mcp.tool_registry import default_registry
+
+        return [entry.model_dump(mode="json") for entry in default_registry().list_all()]
+    except Exception:
+        return []
+    finally:
+        if injected:
+            try:
+                sys.path.remove(candidate)
+            except ValueError:
+                pass
+
+
 def ensure_dirs(settings: Settings) -> None:
     settings.data_root.mkdir(parents=True, exist_ok=True)
     settings.projects_root.mkdir(parents=True, exist_ok=True)
@@ -4249,6 +4282,171 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         requires_approval=True,
         description="Run a FreeCAD macro (requires explicit approval; potentially destructive)",
     )
+
+    def _registry_entry_requires_approval(entry: dict[str, Any]) -> bool:
+        return bool(
+            entry.get("mutates_cad")
+            or entry.get("mutates_package")
+            or entry.get("may_update_claim_map")
+            or entry.get("dry_run_support") == "none"
+        )
+
+    def _registry_tool_metadata(entry: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "tool_name": entry.get("tool_name"),
+            "source": "freecad-mcp",
+            "category": entry.get("category"),
+            "purpose": entry.get("purpose"),
+            "required_inputs": entry.get("required_inputs") or [],
+            "optional_inputs": entry.get("optional_inputs") or [],
+            "side_effects": entry.get("side_effects") or [],
+            "mutates_cad": bool(entry.get("mutates_cad")),
+            "mutates_package": bool(entry.get("mutates_package")),
+            "may_update_claim_map": bool(entry.get("may_update_claim_map")),
+            "runtime_requirements": entry.get("runtime_requirements") or [],
+            "dry_run_support": entry.get("dry_run_support") or "none",
+            "claim_policy": entry.get("claim_policy") or {},
+            "notes": entry.get("notes") or [],
+        }
+
+    def _make_unbound_freecad_mcp_tool(entry: dict[str, Any]) -> _rt.ToolHandler:
+        metadata = _registry_tool_metadata(entry)
+        tool_name = str(metadata.get("tool_name") or "freecad_mcp.unbound")
+
+        def _handler(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+            missing_inputs = [
+                name for name in metadata["required_inputs"]
+                if name not in inp and name not in {"package_path"}
+            ]
+            return {
+                "status": "unsupported",
+                "code": "freecad_mcp_runtime_binding_missing",
+                "operation": tool_name,
+                "message": (
+                    "This freecad-mcp registry entry is available to the planner, "
+                    "but a direct aieng-ui runtime executor has not been bound yet."
+                ),
+                "missing_inputs": missing_inputs,
+                "received_input_keys": sorted(str(key) for key in inp.keys()),
+                "tool_metadata": metadata,
+                "claim_policy": {
+                    "claims_advanced": False,
+                    "requires_explicit_update_claim": True,
+                },
+            }
+
+        return _handler
+
+    def _tool_registry_query(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        entries = _load_freecad_mcp_registry_entries(active_settings)
+        category = inp.get("category")
+        keyword = str(inp.get("keyword") or "").strip().lower()
+        mutability = inp.get("mutability")
+        filtered = entries
+        if category:
+            filtered = [entry for entry in filtered if entry.get("category") == category]
+        if keyword:
+            filtered = [
+                entry for entry in filtered
+                if keyword in str(entry.get("tool_name") or "").lower()
+                or keyword in str(entry.get("purpose") or "").lower()
+                or any(keyword in str(note).lower() for note in entry.get("notes") or [])
+            ]
+        if mutability == "cad":
+            filtered = [entry for entry in filtered if entry.get("mutates_cad")]
+        elif mutability == "package":
+            filtered = [entry for entry in filtered if entry.get("mutates_package")]
+        elif mutability == "claim_map":
+            filtered = [entry for entry in filtered if entry.get("may_update_claim_map")]
+        elif mutability == "none":
+            filtered = [
+                entry for entry in filtered
+                if not entry.get("mutates_cad")
+                and not entry.get("mutates_package")
+                and not entry.get("may_update_claim_map")
+            ]
+        elif mutability == "any":
+            filtered = [
+                entry for entry in filtered
+                if entry.get("mutates_cad")
+                or entry.get("mutates_package")
+                or entry.get("may_update_claim_map")
+            ]
+        return {
+            "status": "success",
+            "operation": "aieng_tool_registry_query",
+            "count": len(filtered),
+            "filters": {
+                "category": category,
+                "keyword": inp.get("keyword"),
+                "mutability": mutability,
+            },
+            "entries": filtered,
+            "claim_policy": {
+                "claims_advanced": False,
+                "requires_explicit_update_claim": True,
+            },
+        }
+
+    def _tool_inspect_mcp_capabilities(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        desired = str(inp.get("desired_outcome") or inp.get("message") or "").strip().lower()
+        caps = agent_workbench.list_capabilities(active_settings)
+        if desired:
+            tokens = [part for part in re.split(r"\W+", desired) if part]
+            caps = [
+                cap for cap in caps
+                if any(
+                    token in str(cap.get("name") or "").lower()
+                    or token in str(cap.get("purpose") or "").lower()
+                    or token in str(cap.get("category") or "").lower()
+                    for token in tokens
+                )
+            ] or caps
+        return {
+            "status": "success",
+            "operation": "aieng_inspect_capabilities",
+            "desired_outcome": inp.get("desired_outcome") or "",
+            "capabilities": caps[:80],
+            "registered_runtime_tool_count": len(_rt.registered_tool_names()),
+            "claim_policy": {
+                "claims_advanced": False,
+                "requires_explicit_update_claim": True,
+            },
+        }
+
+    def _tool_freecad_runtime_capabilities(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        config, _, provider = resolve_provider_bundle(active_settings)
+        return {
+            "status": "success",
+            "operation": "freecad_runtime_capabilities",
+            "runtime_config": config,
+            "capabilities": provider.probe_capabilities(whitelisted_tools=TOOLS_ALLOWED),
+            "claim_policy": {
+                "claims_advanced": False,
+                "requires_explicit_update_claim": True,
+            },
+        }
+
+    registry_bound_handlers: dict[str, _rt.ToolHandler] = {
+        "aieng_parse_patch": _tool_mcp_parse_patch,
+        "aieng_tool_registry_query": _tool_registry_query,
+        "aieng_inspect_capabilities": _tool_inspect_mcp_capabilities,
+        "aieng_plan_capabilities": _tool_inspect_mcp_capabilities,
+        "freecad_runtime_capabilities": _tool_freecad_runtime_capabilities,
+    }
+    registered_names = set(_rt.registered_tool_names())
+    for entry in _load_freecad_mcp_registry_entries(active_settings):
+        tool_name = str(entry.get("tool_name") or "").strip()
+        if not tool_name or tool_name in registered_names:
+            continue
+        handler = registry_bound_handlers.get(tool_name) or _make_unbound_freecad_mcp_tool(entry)
+        _rt.register_tool(
+            tool_name,
+            handler,
+            requires_approval=_registry_entry_requires_approval(entry),
+            description=str(entry.get("purpose") or f"freecad-mcp registry tool: {tool_name}"),
+        )
+        registered_names.add(tool_name)
 
     # Configure file-backed run persistence
     _rt.configure(

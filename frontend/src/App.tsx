@@ -77,10 +77,10 @@ const DEFAULT_LLM_CONFIG: LLMConfig = {
 };
 
 const CONTROL_PANE_MODES: Array<{ id: ControlPaneMode; label: string; detail: string }> = [
-  { id: "chat", label: "LLM 主流程", detail: "Provider 配置与 Agent 编排" },
-  { id: "project", label: "项目", detail: "导入与语义摘要" },
-  { id: "agent", label: "Agent", detail: "能力与工作流" },
-  { id: "cae", label: "CAE", detail: "证据与结果" },
+  { id: "chat", label: "智能编排", detail: "对话、计划与审批" },
+  { id: "project", label: "项目数据", detail: "导入与语义摘要" },
+  { id: "agent", label: "能力中心", detail: "工具、工作流与评测" },
+  { id: "cae", label: "CAE 证据", detail: "仿真设置与结果" },
 ];
 
 function jsonBlock(value: unknown) {
@@ -554,75 +554,6 @@ function JsonDisclosure({ title, body, defaultOpen = false }: { title: string; b
   );
 }
 
-type LlmPriorityCardProps = {
-  llmConfig: LLMConfig;
-  llmReady: boolean;
-  selectedProjectName?: string | null;
-  agentBusy: boolean;
-  controlPaneMode: ControlPaneMode;
-  onOpenSettings(): void;
-  onFocusChat(): void;
-  onPlan(): void;
-  onRun(): void;
-};
-
-function LlmPriorityCard({
-  llmConfig,
-  llmReady,
-  selectedProjectName,
-  agentBusy,
-  controlPaneMode,
-  onOpenSettings,
-  onFocusChat,
-  onPlan,
-  onRun,
-}: LlmPriorityCardProps) {
-  return (
-    <section className="card llm-priority-card">
-      <div className="section-heading">
-        <div>
-          <h2>LLM 主流程</h2>
-          <p>自然语言编排优先显示，Provider 参数统一放进环境设置。项目、Agent、CAE 仍按原流程保留。</p>
-        </div>
-        <div className={`llm-readiness-pill ${llmReady ? "ready" : "degraded"}`}>
-          {llmReady ? "LLM ready" : "需要 Provider 配置"}
-        </div>
-      </div>
-
-      <div className="capability-facts llm-facts-grid">
-        <div><span>当前 Provider</span><strong>{getLlmProviderLabel(llmConfig.provider)}</strong></div>
-        <div><span>当前模型</span><strong>{llmConfig.model || "-"}</strong></div>
-        <div><span>当前项目</span><strong>{selectedProjectName ?? "未绑定项目"}</strong></div>
-        <div><span>入口状态</span><strong>{controlPaneMode === "chat" ? "LLM 主流程" : "辅助面板中"}</strong></div>
-      </div>
-
-      <div className="summary-note summary-muted llm-summary-note">
-        <strong>{llmReady ? "LLM planner 会优先接管" : "当前会退化到 heuristic planner"}</strong>
-        <p>
-          {llmReady
-            ? "Agent plan、workflow、benchmark 会复用环境设置里的 LLM Provider。"
-            : "没有完整 Provider 时，后端会保留启发式 planner 兜底。"}
-        </p>
-      </div>
-
-      <div className="action-row llm-primary-actions">
-        <button type="button" disabled={agentBusy} onClick={onPlan}>
-          生成 LLM 计划
-        </button>
-        <button type="button" className="ghost-button" disabled={agentBusy} onClick={onRun}>
-          执行 LLM 计划
-        </button>
-        <button type="button" className="ghost-button" onClick={onFocusChat}>
-          聚焦主流程
-        </button>
-        <button type="button" className="ghost-button" onClick={onOpenSettings}>
-          配置 Provider
-        </button>
-      </div>
-    </section>
-  );
-}
-
 type LlmProviderSettingsProps = {
   llmConfig: LLMConfig;
   llmReady: boolean;
@@ -942,7 +873,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [summary, setSummary] = useState<ProjectSummary | null>(null);
   const [projectName, setProjectName] = useState("STEP 工作台项目");
-  const [message, setMessage] = useState("检查当前项目状态，并生成一份可审阅、可执行的 LLM Agent 计划。");
+  const [message, setMessage] = useState("检查当前项目状态，生成一份可审阅的工程执行计划。");
   const [chat, setChat] = useState<ChatResponse | null>(null);
   const [chatHistory, setChatHistory] = useState<ChatHistoryItem[]>([]);
   const [busy, setBusy] = useState(false);
@@ -1017,6 +948,14 @@ export default function App() {
   const summaryViewerFormat = typeof summary?.viewer?.asset_format === "string" ? summary.viewer.asset_format : null;
   const effectiveViewerFormat = resolveAssetFormat(rawViewerUrl, summaryViewerFormat ?? selectedProject?.web_asset_format ?? null);
   const llmReady = useMemo(() => isLlmConfigReady(llmConfig), [llmConfig]);
+  const availableMcpCapabilityCount = useMemo(
+    () => capabilities.filter((item) => item.available && String(item.source).toLowerCase().includes("mcp")).length,
+    [capabilities],
+  );
+  const executableMcpToolCount = useMemo(
+    () => capabilities.filter((item) => item.available && item.source === "aieng-ui-runtime" && item.name.startsWith("mcp.")).length,
+    [capabilities],
+  );
 
   useEffect(() => {
     try {
@@ -1407,6 +1346,15 @@ export default function App() {
       setSelectedScenarioId((current) => current || nextScenarios[0]?.id || "");
       setNotice({ tone: "success", title: "Agent 工作台已刷新", detail: "能力注册表、工作流和 benchmark 场景已重新读取。" });
     });
+  }
+
+  function openMcpCapabilities() {
+    setCapabilityCategory("all");
+    setCapabilityQuery("mcp");
+    setControlPaneMode("agent");
+    if (!capabilities.length) {
+      void refreshAgentWorkbench();
+    }
   }
 
   async function previewSelectedCapability(approved = false) {
@@ -1900,18 +1848,6 @@ export default function App() {
               </button>
             ))}
           </div>
-
-          <LlmPriorityCard
-            llmConfig={llmConfig}
-            llmReady={llmReady}
-            selectedProjectName={selectedProject?.name ?? null}
-            agentBusy={agentBusy}
-            controlPaneMode={controlPaneMode}
-            onOpenSettings={() => setSettingsOpen(true)}
-            onFocusChat={() => setControlPaneMode("chat")}
-            onPlan={() => void planAgentChat()}
-            onRun={() => void runAgentChat()}
-          />
 
           {notice ? (
             <div className={`result-banner result-${notice.tone} control-status-banner`}>
@@ -2786,37 +2722,48 @@ export default function App() {
           ) : null}
 
           {controlPaneMode === "chat" ? (
-          <section className="card">
+          <section className="card agent-console-card">
             <div className="section-heading">
               <div>
-                <h2>LLM Agent Console</h2>
-                <p>先用 LLM 生成可审阅计划，再由白名单工具、MCP preflight 和审批闸门执行。这里现在是默认主入口。</p>
+                <h2>工程智能体</h2>
+                <p>对话、计划、审批与审计记录集中在同一工作区。</p>
               </div>
+              <button type="button" className="ghost-button compact-button" onClick={() => setSettingsOpen(true)}>
+                模型设置
+              </button>
             </div>
 
             <div className="agent-chat-strip">
               <div>
-                <strong>{agentPlan ? `当前计划：${agentPlan.steps.length} steps / ${agentPlan.mode}` : "LLM 驱动的建模入口"}</strong>
+                <strong>{agentPlan ? `当前计划：${agentPlan.steps.length} 步 / ${agentPlan.mode}` : "模型驱动编排"}</strong>
                 <span>
                   {agentPlan
-                    ? agentPlan.preview.warnings[0] || (agentPlan.requires_approval ? "包含审批步骤" : "当前计划不需要审批")
+                    ? agentPlan.preview.warnings[0] || (agentPlan.requires_approval ? "包含人工审批节点" : "当前计划无需人工审批")
                     : llmReady
-                      ? "可以直接描述建模目标，系统会优先走 LLM planner。"
-                      : "Provider 未配完整时仍可运行，但会退化到本地启发式 planner。"}
+                      ? `${getLlmProviderLabel(llmConfig.provider)} / ${llmConfig.model}，可规划运行时与 MCP 工具调用。`
+                      : "模型 Provider 未完成配置，当前使用规则规划兜底。"}
                 </span>
               </div>
               <div className="capability-facts llm-console-facts">
-                <div><span>Provider</span><strong>{getLlmProviderLabel(llmConfig.provider)}</strong></div>
-                <div><span>Model</span><strong>{llmConfig.model}</strong></div>
-                <div><span>Project</span><strong>{selectedId ?? "-"}</strong></div>
-                <div><span>Route</span><strong>{llmReady ? "LLM-first" : "heuristic fallback"}</strong></div>
+                <div><span>供应商</span><strong>{getLlmProviderLabel(llmConfig.provider)}</strong></div>
+                <div><span>模型</span><strong>{llmConfig.model}</strong></div>
+                <div><span>MCP 能力</span><strong>{availableMcpCapabilityCount}</strong></div>
+                <div><span>可执行 MCP</span><strong>{executableMcpToolCount}</strong></div>
+                <div><span>规划模式</span><strong>{llmReady ? "模型优先" : "规则兜底"}</strong></div>
+                <div><span>项目</span><strong>{selectedProject?.name ?? selectedId ?? "-"}</strong></div>
               </div>
               <div className="agent-chat-actions">
                 <button disabled={agentBusy} onClick={() => void planAgentChat()}>
-                  生成 LLM 计划
+                  生成计划
                 </button>
                 <button className="ghost-button" disabled={agentBusy} onClick={() => void runAgentChat()}>
-                  执行 LLM 计划
+                  执行计划
+                </button>
+                <button className="ghost-button" type="button" onClick={openMcpCapabilities}>
+                  查看工具
+                </button>
+                <button className="ghost-button" type="button" onClick={() => setSettingsOpen(true)}>
+                  模型设置
                 </button>
               </div>
             </div>
@@ -2845,7 +2792,7 @@ export default function App() {
                     ))}
                   </div>
                 ) : null}
-                <JsonDisclosure title="查看 Agent plan payload" body={jsonBlock(agentPlan)} />
+                <JsonDisclosure title="查看计划 payload" body={jsonBlock(agentPlan)} />
               </div>
             ) : null}
 
@@ -2946,24 +2893,24 @@ export default function App() {
                 ))
               ) : (
                 <div className="summary-note summary-muted chat-empty-state">
-                  <strong>聊天窗已就绪</strong>
-                  <p>这里会保留你的请求、编排回复、步骤状态和审计入口，不再只显示一次性的 plan 结果。</p>
+                  <strong>等待工程请求</strong>
+                  <p>计划、执行状态和审计入口会在这里持续保留。</p>
                 </div>
               )}
             </div>
 
             <textarea rows={4} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="例如：总结当前模型并给出下一步可执行的安全操作。" />
             <details className="fold-block legacy-chat-panel">
-              <summary className="fold-summary">兼容 / 调试路径</summary>
+              <summary className="fold-summary">规则编排与运行时调试</summary>
               <div className="legacy-chat-actions">
                 <button disabled={!selectedId || busy} className="ghost-button" onClick={() => void submitChat("plan")}>
-                  旧版规则计划
+                  规则计划
                 </button>
                 <button disabled={!selectedId || busy} className="ghost-button" onClick={() => void submitChat("execute")}>
-                  旧版安全执行
+                  规则执行
                 </button>
                 <button disabled={busy} className="ghost-button" onClick={() => void submitRuntime()}>
-                  直接 runtime
+                  Runtime 执行
                 </button>
               </div>
             </details>

@@ -1606,6 +1606,52 @@ def default_registry():
     assert "benchmark.ai_usefulness.run" in names
 
 
+def test_runtime_tools_include_freecad_mcp_registry_entries(tmp_path: Path) -> None:
+    settings = _make_runtime_settings(tmp_path)
+    mcp_src = settings.freecad_mcp_root / "src" / "freecad_mcp"
+    mcp_src.mkdir(parents=True)
+    (mcp_src / "__init__.py").write_text("", encoding="utf-8")
+    (mcp_src / "tool_registry.py").write_text(
+        """
+from dataclasses import dataclass
+
+@dataclass
+class Entry:
+    def model_dump(self, mode='json'):
+        return {
+            'tool_name': 'cad_registry_only_tool',
+            'category': 'cad',
+            'purpose': 'Registry-only CAD tool.',
+            'required_inputs': ['object_name'],
+            'optional_inputs': [],
+            'side_effects': ['Modifies CAD document'],
+            'mutates_cad': True,
+            'mutates_package': False,
+            'may_update_claim_map': False,
+            'runtime_requirements': ['freecad'],
+            'dry_run_support': 'none',
+            'claim_policy': {'claims_advanced_default': False},
+        }
+
+class Registry:
+    def list_all(self):
+        return [Entry()]
+
+def default_registry():
+    return Registry()
+""",
+        encoding="utf-8",
+    )
+
+    client = TestClient(create_app(settings))
+    response = client.get("/api/runtime/tools")
+
+    assert response.status_code == 200
+    tools_by_name = {item["name"]: item for item in response.json()}
+    assert "cad_registry_only_tool" in tools_by_name
+    assert tools_by_name["cad_registry_only_tool"]["requires_approval"] is True
+
+
 def test_capability_preview_requires_approval_for_mutating_tool(tmp_path: Path) -> None:
     settings = _make_runtime_settings(tmp_path)
     mcp_src = settings.freecad_mcp_root / "src" / "freecad_mcp"
