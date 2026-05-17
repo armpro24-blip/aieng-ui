@@ -7,7 +7,9 @@ so the service starts normally even when aieng_freecad_mcp is not installed.
 
 from __future__ import annotations
 
+import os
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 import asyncio
@@ -145,6 +147,181 @@ def run_macro(
     )
 
 
+class _MacroRunnerCadExecutor:
+    """Minimal CadExecutor adapter that runs Python code via FreeCADCmd macro_runner.
+
+    Wraps generated code in a temporary macro, executes via subprocess,
+    and parses ``__AIENG_RESULT__`` JSON from stdout.
+    """
+
+    def __init__(
+        self,
+        freecad_cmd: str | Path,
+        freecad_mcp_root: str | Path,
+        input_fcstd: str | Path | None = None,
+        timeout: int = 300,
+    ) -> None:
+        self.freecad_cmd = Path(freecad_cmd)
+        self.freecad_mcp_root = Path(freecad_mcp_root)
+        self.input_fcstd = str(input_fcstd) if input_fcstd else None
+        self.timeout = timeout
+
+    async def execute_async(self, code: str) -> dict[str, Any]:
+        import json as _json
+
+        # Ensure _result_ is printed so we can parse it back
+        wrapped = code.rstrip() + '\nimport json\nprint("__AIENG_RESULT__" + json.dumps(_result_))\n'
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write(wrapped)
+            macro_path = f.name
+
+        try:
+            result = run_macro(
+                macro_path,
+                freecad_cmd=self.freecad_cmd,
+                freecad_mcp_root=self.freecad_mcp_root,
+                document_path=self.input_fcstd,
+                timeout=self.timeout,
+            )
+            if result.get("status") != "ok":
+                return {
+                    "success": False,
+                    "error": result.get("error_message", "Macro execution failed"),
+                    "stdout": result.get("stdout", ""),
+                    "stderr": result.get("stderr", ""),
+                }
+            stdout = result.get("stdout", "")
+            for line in reversed(stdout.splitlines()):
+                if line.startswith("__AIENG_RESULT__"):
+                    payload = _json.loads(line[len("__AIENG_RESULT__"):])
+                    return {"success": True, "result": payload}
+            return {
+                "success": False,
+                "error": "No __AIENG_RESULT__ marker found in macro stdout",
+                "stdout": stdout[:500],
+            }
+        finally:
+            Path(macro_path).unlink(missing_ok=True)
+
+    async def get_version_async(self) -> dict[str, Any]:
+        code = 'import FreeCAD\n_result_ = {"version": ".".join(str(v) for v in FreeCAD.Version()[:3])}'
+        return await self.execute_async(code)
+
+
+def _resolve_executor(
+    mode: str,
+    freecad_cmd: Path,
+    freecad_mcp_root: Path,
+    context: Any,
+    input_fcstd: str | Path | None = None,
+) -> tuple[Any, str]:
+    """Select executor based on mode. Returns (executor, source_tag).
+
+    Modes:
+    - auto:  use macro runner if FreeCADCmd exists; honest fail otherwise.
+    - macro: explicit macro runner via FreeCADCmd.
+    - rpc:   explicit FreecadExecutor (XML-RPC / embedded).
+    - stub:  explicit stub executor (testing only).
+    """
+    mode = mode.lower().strip()
+
+    if mode == "stub":
+        from freecad_mcp.aieng_bridge.stub_executor import StubFreecadExecutor  # type: ignore[import]
+        return StubFreecadExecutor(context.feature_graph or {}), "stub"
+
+    if mode == "rpc":
+        from freecad_mcp.bridge.executor import FreecadExecutor  # type: ignore[import]
+        executor = FreecadExecutor()
+        executor.connect()
+        return executor, "rpc"
+
+    # auto or macro
+    if not freecad_cmd.exists():
+        raise RuntimeError(
+            f"FreeCADCmd not found at {freecad_cmd}. "
+            f"Set AIENG_FREECAD_EXECUTOR=stub for testing, or install FreeCAD."
+        )
+
+    return _MacroRunnerCadExecutor(
+        freecad_cmd=freecad_cmd,
+        freecad_mcp_root=freecad_mcp_root,
+        input_fcstd=input_fcstd,
+        timeout=300,
+    ), "macro"
+
+
+def generate_mesh(
+    input_path: str | Path,
+    output_dir: str | Path,
+    *,
+    mesh_size_mm: float = 5.0,
+    freecad_cmd: str | Path,
+    freecad_mcp_root: str | Path,
+    timeout: int = 300,
+) -> dict[str, Any]:
+    """Generate a finite-element mesh via FreeCAD + Gmsh using macro_runner.
+
+    Returns:
+        {"status": "success", "mesh_file_path": "..."} or {"status": "error", ...}.
+    """
+    _load_src(freecad_mcp_root)
+    out_dir = Path(output_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    macro_path = out_dir / "_mesh_gen.py"
+    macro_path.write_text(
+        f'''
+import FreeCAD
+import femmesh.gmshtools as gmshtools
+
+doc = FreeCAD.open("{Path(input_path).as_posix()}")
+obj = doc.Objects[0]
+mesh = doc.addObject("Fem::FemMeshShapeNetgenObject", "Mesh")
+mesh.Shape = obj.Shape
+gmsh = gmshtools.GmshTools(mesh)
+gmsh.Region = {mesh_size_mm}
+gmsh.create_mesh()
+doc.recompute()
+
+out_path = "{(out_dir / "mesh.inp").as_posix()}"
+mesh.FemMesh.write(out_path)
+print("MESH_WRITTEN:" + out_path)
+''',
+        encoding="utf-8",
+    )
+
+    result = run_macro(
+        macro_path,
+        freecad_cmd=freecad_cmd,
+        freecad_mcp_root=freecad_mcp_root,
+        document_path=str(input_path),
+        timeout=timeout,
+    )
+
+    stdout = result.get("stdout", "")
+    mesh_path = None
+    for line in stdout.splitlines():
+        if line.startswith("MESH_WRITTEN:"):
+            mesh_path = line.split(":", 1)[1].strip()
+            break
+
+    if result.get("status") != "ok" or not mesh_path or not Path(mesh_path).exists():
+        return {
+            "status": "error",
+            "message": "Mesh generation failed",
+            "stdout": stdout,
+            "stderr": result.get("stderr", ""),
+        }
+
+    return {
+        "status": "success",
+        "mesh_file_path": mesh_path,
+        "stdout": stdout,
+        "stderr": result.get("stderr", ""),
+    }
+
+
 def export_computed_metrics(
     input_path: str | Path,
     output_path: str | Path,
@@ -202,12 +379,18 @@ def edit_parameter(
     freecad_mcp_root: str | Path,
     input_fcstd: str | Path | None = None,
     artifact_output_dir: str | Path | None = None,
+    executor_mode: str = "auto",
+    freecad_cmd: str | Path | None = None,
 ) -> dict[str, Any]:
     """Execute one guarded parameter edit through the freecad-mcp patch bridge.
 
     The bridge validates the semantic feature/parameter mapping against the
     package and executes via freecad-mcp's deterministic patch executor. The UI
     runtime remains responsible for approval gating and package write-back.
+
+    Args:
+        executor_mode: "auto" | "macro" | "rpc" | "stub". auto prefers macro runner.
+        freecad_cmd: Required for auto/macro modes. Path to FreeCADCmd executable.
     """
     _load_src(freecad_mcp_root)
 
@@ -217,7 +400,6 @@ def edit_parameter(
             execute_patch_plan,
             parse_patch_proposal,
         )
-        from freecad_mcp.aieng_bridge.stub_executor import StubFreecadExecutor  # type: ignore[import]
     except ImportError as exc:
         raise RuntimeError(
             f"Cannot import freecad_mcp parameter-edit bridge from {Path(freecad_mcp_root) / 'src'!r}: {exc}"
@@ -236,28 +418,57 @@ def edit_parameter(
     }
     context = load_aieng_context(Path(package_path))
     plan = parse_patch_proposal(patch)
-    executor = StubFreecadExecutor(context.feature_graph or {})
 
-    async def _run() -> Any:
-        return await execute_patch_plan(
-            plan,
-            executor,
-            context=context,
-            package_path=Path(package_path),
-            input_fcstd=Path(input_fcstd) if input_fcstd else None,
-            artifact_output_dir=Path(artifact_output_dir) if artifact_output_dir else None,
-            dry_run=False,
-            export_modified_step=True,
-            export_modified_fcstd=False,
-            persist_to_aieng=True,
-        )
+    executor, source_tag = _resolve_executor(
+        mode=executor_mode,
+        freecad_cmd=Path(freecad_cmd) if freecad_cmd else Path(),
+        freecad_mcp_root=freecad_mcp_root,
+        context=context,
+        input_fcstd=input_fcstd,
+    )
 
-    summary = asyncio.run(_run())
+    try:
+        async def _run() -> Any:
+            return await execute_patch_plan(
+                plan,
+                executor,
+                package_path=Path(package_path),
+                input_fcstd=Path(input_fcstd) if input_fcstd else None,
+                artifact_output_dir=Path(artifact_output_dir) if artifact_output_dir else None,
+                dry_run=False,
+                export_modified_step=True,
+                export_modified_fcstd=False,
+                persist_to_aieng=True,
+            )
+
+        summary = asyncio.run(_run())
+    finally:
+        if hasattr(executor, "disconnect"):
+            executor.disconnect()
+
     payload = summary.model_dump(mode="json") if hasattr(summary, "model_dump") else dict(summary)
+    warnings = list(payload.get("warnings") or [])
+
+    if source_tag == "stub":
+        warnings.append(
+            "CAD parameter edit was executed using a stub/mock executor. "
+            "No real FreeCAD mutation occurred. STEP export may be simulated."
+        )
+        # Stub must not claim success if it produced no real STEP file
+        if payload.get("status") == "success":
+            # Check whether any claimed STEP artifact actually exists
+            for art in payload.get("artifacts_written", []):
+                if str(art).endswith((".step", ".stp")) and not Path(str(art)).exists():
+                    payload["status"] = "partial"
+                    warnings.append(
+                        f"STEP artifact {art} was reported by stub but does not exist on disk."
+                    )
+
     return {
         "status": payload.get("status"),
         "summary": payload,
         "artifacts_written": payload.get("artifacts_written", []),
-        "warnings": payload.get("warnings", []),
+        "warnings": warnings,
         "errors": payload.get("errors", []),
+        "source": "stub_mock" if source_tag == "stub" else "freecad_real",
     }

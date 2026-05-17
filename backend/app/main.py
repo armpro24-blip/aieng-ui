@@ -1372,6 +1372,63 @@ def _write_modified_step_into_package(
     return dest
 
 
+def _unpack_geometry_from_package(package_path: Path, internal_path: str) -> Path:
+    """Extract a geometry file from inside a .aieng package to a temporary file.
+
+    Returns the path to the temporary file. The caller is responsible for cleanup.
+    """
+    with zipfile.ZipFile(package_path, "r") as zf:
+        data = zf.read(internal_path)
+    temp_dir = Path(tempfile.mkdtemp(prefix="aieng_mesh_geometry_"))
+    temp_path = temp_dir / Path(internal_path).name
+    temp_path.write_bytes(data)
+    return temp_path
+
+
+def _write_mesh_into_package_atomic(
+    package_path: Path,
+    mesh_file: Path,
+    internal_path: str,
+) -> str:
+    """Atomically write a mesh file into a .aieng package.
+
+    Reads all existing members, updates manifest.resources.simulation.mesh,
+    writes a new ZIP, and moves it over the original.
+    """
+    with zipfile.ZipFile(package_path, "r") as zf:
+        members = [(info, b"" if info.is_dir() else zf.read(info.filename)) for info in zf.infolist() if info.filename != internal_path]
+        manifest = json.loads(zf.read("manifest.json")) if "manifest.json" in zf.namelist() else {"resources": {}}
+
+    resources = manifest.setdefault("resources", {})
+    sim = resources.setdefault("simulation", {})
+    if not isinstance(sim, dict):
+        sim = {}
+        resources["simulation"] = sim
+    sim["mesh"] = internal_path
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".aieng", dir=package_path.parent) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as out_zf:
+            seen: set[str] = set()
+            for info, data in members:
+                if info.filename in seen or info.filename == "manifest.json":
+                    continue
+                seen.add(info.filename)
+                out_zf.writestr(info, data)
+            if "simulation/" not in seen:
+                out_zf.writestr("simulation/", b"")
+            if "simulation/mesh/" not in seen:
+                out_zf.writestr("simulation/mesh/", b"")
+            out_zf.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+            out_zf.writestr(internal_path, mesh_file.read_bytes())
+        shutil.move(str(tmp_path), package_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+    return internal_path
+
+
 def convert_stl_to_glb(stl_path: Path, glb_path: Path) -> dict[str, Any]:
     try:
         import trimesh
@@ -2273,6 +2330,15 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     @app.post("/api/runtime-config/test")
     def test_runtime_config(payload: dict[str, Any] = Body(default=None)) -> dict[str, Any]:
         return runtime_config_snapshot(active_settings, payload or {})
+
+    @app.post("/api/llm/test")
+    def test_llm_provider_endpoint(payload: dict[str, Any] = Body(default=None)) -> dict[str, Any]:
+        data = payload or {}
+        llm_config = agent_engine.sanitize_llm_config(data.get("llm_config"))
+        if not llm_config:
+            raise HTTPException(status_code=400, detail="llm_config is required")
+        verify = bool(data.get("verify_connection", False))
+        return agent_engine.test_llm_provider(active_settings, llm_config, verify_connection=verify)
 
     @app.get("/api/capabilities")
     def list_capabilities() -> list[dict[str, Any]]:
@@ -4550,6 +4616,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 freecad_mcp_root=active_settings.freecad_mcp_root,
                 input_fcstd=input_fcstd,
                 artifact_output_dir=artifact_dir,
+                executor_mode=os.environ.get("AIENG_FREECAD_EXECUTOR", "auto"),
+                freecad_cmd=active_settings.freecad_cmd,
             )
         except Exception as exc:
             return {
@@ -4570,6 +4638,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "bridge_result": bridge_result,
             }
 
+        source = bridge_result.get("source", "unknown")
+
+        # Stub/mock mode: must not report completed, must not write fake artifacts
+        if source == "stub_mock":
+            return {
+                "ok": True,
+                "tool": "cad.edit_parameter",
+                "status": "partial",
+                "package_path": str(package_path),
+                "feature_id": feature_id,
+                "parameter_name": parameter_name,
+                "new_value": new_value,
+                "freecad_object_name": contract["freecad_object_name"],
+                "freecad_parameter_name": contract["freecad_parameter_name"],
+                "package_geometry_path": None,
+                "stale_artifacts": list(_GEOMETRY_STALE_ARTIFACTS),
+                "warnings": bridge_result.get("warnings", []),
+                "bridge_result": bridge_result,
+                "artifacts": [],
+                "source": source,
+            }
+
         geometry_artifacts: list[dict[str, str]] = []
         package_geometry_path: str | None = None
         for artifact in bridge_result.get("artifacts_written", []):
@@ -4587,6 +4677,18 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "role": "modified_geometry",
                 })
                 break
+
+        # If a real executor claimed success but STEP is missing, do not lie
+        if bridge_result.get("status") == "success" and not package_geometry_path:
+            return {
+                "ok": False,
+                "tool": "cad.edit_parameter",
+                "status": "error",
+                "code": "missing_step_export",
+                "message": "Parameter edit succeeded but STEP export artifact was not found on disk.",
+                "bridge_result": bridge_result,
+                "source": source,
+            }
 
         stale_artifacts = [
             art for art in _GEOMETRY_STALE_ARTIFACTS
@@ -4608,6 +4710,178 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "warnings": bridge_result.get("warnings", []),
             "bridge_result": bridge_result,
             "artifacts": geometry_artifacts,
+            "source": source,
+        }
+
+    def _tool_cae_generate_mesh(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import freecad_bridge
+        from pathlib import Path as _Path
+
+        package_path_str: str | None = inp.get("packagePath") or inp.get("package_path")
+        project_id: str | None = inp.get("project_id")
+        geometry_path: str | None = inp.get("geometry_path")
+        mesh_size_mm: float = float(inp.get("mesh_size_mm", 5.0))
+        element_type: str = str(inp.get("element_type", "tetrahedral"))
+        output_format: str = str(inp.get("output_format", "inp"))
+
+        if not package_path_str and project_id:
+            proj = get_project(active_settings, project_id)
+            pkg = resolve_project_path(active_settings, project_id, proj.get("aieng_file"))
+            if pkg is not None and pkg.exists():
+                package_path_str = str(pkg)
+
+        if not package_path_str:
+            return {
+                "ok": False,
+                "tool": "cae.generate_mesh",
+                "status": "error",
+                "code": "missing_package_path",
+                "message": "No package path provided and no project_id could be resolved.",
+            }
+
+        package_path = _Path(package_path_str)
+        if not package_path.exists():
+            return {
+                "ok": False,
+                "tool": "cae.generate_mesh",
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Package not found: {package_path_str}",
+            }
+
+        # Resolve geometry_path from manifest if not explicitly provided
+        if not geometry_path:
+            with zipfile.ZipFile(package_path, "r") as zf:
+                manifest = json.loads(zf.read("manifest.json")) if "manifest.json" in zf.namelist() else {"resources": {}}
+                namelist = zf.namelist()
+            resources = manifest.get("resources", {})
+            geom = resources.get("geometry", {})
+            if isinstance(geom, dict):
+                geometry_path = geom.get("source") or geom.get("primary") or geom.get("modified")
+            # Fallback: scan ZIP for geometry files
+            if not geometry_path:
+                for name in namelist:
+                    lower = name.lower()
+                    if lower.endswith(".step") or lower.endswith(".stp") or lower.endswith(".fcstd"):
+                        geometry_path = name
+                        break
+
+        if not geometry_path:
+            return {
+                "ok": False,
+                "tool": "cae.generate_mesh",
+                "status": "error",
+                "code": "missing_geometry",
+                "message": "No geometry_path provided and package manifest has no primary geometry.",
+            }
+
+        # Unpack geometry from ZIP to a temporary file (must not assume filesystem path)
+        try:
+            temp_geometry_path = _unpack_geometry_from_package(package_path, geometry_path)
+        except KeyError:
+            return {
+                "ok": False,
+                "tool": "cae.generate_mesh",
+                "status": "error",
+                "code": "geometry_not_in_package",
+                "message": f"Geometry path '{geometry_path}' not found inside the .aieng package.",
+            }
+
+        mesh_dir = package_path.parent / "simulation" / "mesh"
+        mesh_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            bridge_result = freecad_bridge.generate_mesh(
+                temp_geometry_path,
+                mesh_dir,
+                mesh_size_mm=mesh_size_mm,
+                freecad_cmd=active_settings.freecad_cmd,
+                freecad_mcp_root=active_settings.freecad_mcp_root,
+            )
+        except (RuntimeError, FileNotFoundError) as exc:
+            # FreeCAD not available → honest error (do not fake completed)
+            msg = str(exc).lower()
+            if "freecad" in msg or "freecadcmd" in msg or "no such file" in msg or "cannot find" in msg:
+                return {
+                    "ok": False,
+                    "tool": "cae.generate_mesh",
+                    "status": "error",
+                    "code": "freecad_unavailable",
+                    "message": f"FreeCAD/Gmsh bridge unavailable: {exc}",
+                    "package_path": str(package_path),
+                    "mesh_artifact_path": None,
+                    "mesh_metadata_path": None,
+                    "unpacked_geometry": str(temp_geometry_path),
+                    "mesh_size_mm": mesh_size_mm,
+                    "element_type": element_type,
+                    "output_format": output_format,
+                }
+            raise
+        except Exception as exc:
+            return {
+                "ok": False,
+                "tool": "cae.generate_mesh",
+                "status": "error",
+                "code": "bridge_error",
+                "message": str(exc),
+            }
+
+        if bridge_result.get("status") != "success":
+            return {
+                "ok": False,
+                "tool": "cae.generate_mesh",
+                "status": "error",
+                "code": "mesh_generation_failed",
+                "message": bridge_result.get("message", "Mesh generation failed"),
+                "bridge_stdout": bridge_result.get("stdout"),
+                "bridge_stderr": bridge_result.get("stderr"),
+            }
+
+        mesh_file_path = _Path(bridge_result["mesh_file_path"])
+        safe_name = f"mesh_{mesh_size_mm}mm.{output_format}"
+        package_mesh_path = _write_mesh_into_package_atomic(
+            package_path,
+            mesh_file_path,
+            f"simulation/mesh/{safe_name}",
+        )
+
+        metadata = {
+            "schema_version": "0.1",
+            "mesh_size_mm": mesh_size_mm,
+            "element_type": element_type,
+            "output_format": output_format,
+            "source_geometry": str(temp_geometry_path),
+            "mesh_file": package_mesh_path,
+            "generated_at": datetime.now(timezone.utc).isoformat(),
+        }
+        metadata_path = mesh_dir / "mesh_metadata.json"
+        metadata_path.write_text(json.dumps(metadata, indent=2), encoding="utf-8")
+        _write_mesh_into_package_atomic(
+            package_path,
+            metadata_path,
+            "simulation/mesh/mesh_metadata.json",
+        )
+
+        stale_artifacts = [
+            "results/computed_metrics.json",
+            "results/field_regions.json",
+            "results/field_summary.json",
+            "results/field_summary.md",
+            "simulation/solver_input.inp",
+            "simulation/solver_inputDeck.inp",
+        ]
+
+        return {
+            "ok": True,
+            "tool": "cae.generate_mesh",
+            "status": "completed",
+            "package_path": str(package_path),
+            "mesh_artifact_path": package_mesh_path,
+            "mesh_metadata_path": "simulation/mesh/mesh_metadata.json",
+            "stale_artifacts": stale_artifacts,
+            "mesh_size_mm": mesh_size_mm,
+            "element_type": element_type,
+            "output_format": output_format,
         }
 
     _rt.register_tool(
@@ -4796,6 +5070,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "Approval-gated CAD parameter edit. Validates feature_id, parameter_name, "
             "and declared bounds from graph/feature_graph.json before delegating to "
             "the FreeCAD bridge; marks geometry-derived artifacts stale."
+        ),
+    )
+    _rt.register_tool(
+        "cae.generate_mesh",
+        _tool_cae_generate_mesh,
+        requires_approval=True,
+        description=(
+            "Generate a finite-element mesh from CAD geometry via FreeCAD/Gmsh (approval-gated). "
+            "Unpacks geometry from .aieng ZIP, runs FreeCAD+Gmsh macro, atomically writes "
+            "simulation/mesh/*.inp and mesh_metadata.json back into the package. "
+            "Returns error/freecad_unavailable when FreeCAD is not installed."
         ),
     )
 

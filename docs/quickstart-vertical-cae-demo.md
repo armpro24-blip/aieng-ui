@@ -14,6 +14,11 @@ A single pytest exercises the full vertical CAE workflow through the
 > FRD scalar extraction → computed-metrics write-back → summary refresh →
 > evidence-backed report
 
+A separate integration test (skipif) verifies real FreeCAD/Gmsh mesh generation:
+
+> geometry ZIP unpack → FreeCAD/Gmsh mesh → `.inp` → `mesh_metadata.json` →
+> atomic write-back → `completed`
+
 The test confirms that an agent (or human caller) can drive a real solver
 adapter through an approval gate, parse real per-node DISP and S fields
 from CalculiX FRD output, and have the resulting scalar extrema land
@@ -64,10 +69,10 @@ fixture.
 |-----------|--------|-----|
 | `ccx` executable | Patched | `shutil.which` returns `/fake/ccx`; `subprocess.run` writes a fixture FRD |
 | `.inp` input deck | Pre-built fixture inside the test package | No mesh-to-deck generator exists yet |
-| Mesh generation | Not implemented | FreeCAD FEM workbench integration is future work |
+| Mesh generation | **Real when FreeCAD available** | `cae.generate_mesh` runs FreeCAD+Gmsh macro; writes `simulation/mesh/*.inp` + `mesh_metadata.json`. Returns `error/freecad_unavailable` when FreeCAD missing. |
 | Binary FRD | Not supported | UTF-8 text FRD only |
 | VTU / ODB parsing | Not supported | Only CalculiX FRD scalar extraction |
-| Field visualization | Synthetic | Frontend colormap is `y_normalized`; no real per-node field serving |
+| Field visualization | Honest labeling | FRD real data → "FRD真实数据" or "FRD数据存在，但几何坐标可能不一致"; synthetic → "合成预览，不可用于工程判断" |
 | Convergence claim | Explicitly avoided | `converged: null` in `solver_run.json`; exit code alone is not reliable evidence |
 | Physical correctness | Not validated | No experimental correlation, mesh convergence study, or independent validation |
 
@@ -78,6 +83,7 @@ fixture.
 - **AIENG is not a solver.** External CalculiX is invoked as a subprocess by the workbench runtime; the result is treated as evidence, not as a validated claim.
 - **AIENG is not a CAD kernel.** Geometry edits happen in FreeCAD via the workbench bridge, not inside the evidence layer.
 - **FRD parsing is scalar extraction only.** Max displacement and max von Mises are computed from per-node DISP and S fields; full-field post-processing is not implemented.
+- **Mesh generation is real when FreeCAD is installed.** Otherwise `cae.generate_mesh` returns honest `error/freecad_unavailable`; no fake success.
 - **No physical correctness validation.** Setup readiness is artifact-presence; result extraction is numerical without correlation.
 - **Convergence is unknown unless reliable evidence exists.** Exit code 0 is not evidence; `converged` stays `null`.
 
@@ -100,3 +106,4 @@ fixture.
 - [Runtime architecture](runtime_architecture.md) — orchestration layer, tool adapters, FreeCAD bridge.
 - [MCP runtime tools](../../aieng_freecad_mcp/docs/mcp_runtime_tools.md) — every MCP tool, contract, and limitation.
 - [Repo boundaries](../../docs/repo_boundaries.md) — ownership, designed coupling points, what must not cross.
+- [Mesh integration test](../backend/tests/INTEGRATION_MESH.md) — how to run real FreeCAD/Gmsh mesh generation, inspect ZIP artifacts.

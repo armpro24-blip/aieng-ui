@@ -328,6 +328,14 @@ _INTENT_MAP: list[tuple[list[str], str, str]] = [
     ),
     (
         [
+            "generate mesh", "mesh generation", "create mesh",
+            "网格生成", "生成网格",
+        ],
+        "cae.generate_mesh",
+        "Generate a finite-element mesh from CAD geometry (requires explicit approval)",
+    ),
+    (
+        [
             "computed metrics", "generate computed metrics", "import computed metrics",
             "create computed_metrics.json", "normalize postprocessing metrics",
             "计算指标", "生成计算指标", "归一化指标",

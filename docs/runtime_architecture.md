@@ -75,11 +75,14 @@ aieng local runtime          ← backend/app/runtime.py  (already exists)
         ├── aieng.read_audit_log
         ├── freecad.inspect_geometry
         ├── freecad.export_step
+        ├── cad.edit_parameter  (approval-gated)
         ├── cae.apply_setup_patch
         ├── cae.extract_solver_results
         ├── cae.prepare_solver_run
         ├── cae.run_solver  (approval-gated)
-        └── freecad.run_macro  (approval-gated)
+        ├── cae.generate_mesh  (approval-gated)
+        ├── freecad.run_macro  (approval-gated)
+        └── mcp.check / mcp.parse_patch / mcp.prepare_execution
 ```
 
 Each tool in `_REGISTRY` maps directly to one MCP tool definition. The MCP
@@ -111,6 +114,8 @@ human-in-the-loop confirmation pattern.
 | `aieng.read_audit_log` tool | ✅ wraps `recent_logs()` |
 | `freecad.inspect_geometry` tool | ✅ real bridge via `freecad_bridge.inspect_geometry()` → `FreeCADCmd` |
 | `freecad.export_step` tool | ✅ real bridge via `freecad_bridge.export_step()` → `FreeCADCmd`; returns artifact refs |
+| `cad.edit_parameter` tool | ✅ real bridge via `freecad_bridge.edit_parameter()`; honest executor selection (`auto` checks `freecad_cmd`, `stub` explicit-only, `macro`/`rpc` real). Returns `source` field (`freecad_real` vs `stub_mock`). Approval-gated. |
+| `cae.generate_mesh` tool | ✅ real bridge via `freecad_bridge.generate_mesh()` → `FreeCADCmd` + Gmsh macro; atomic ZIP write-back. Returns `error/freecad_unavailable` when FreeCAD missing. Approval-gated. |
 | `freecad.run_macro` tool | ✅ skeleton (approval-gated) |
 | `ToolResult.artifacts` hoisting | ✅ `_execute_steps()` extracts `artifacts` list from tool output dict |
 | Per-project artifact audit log | ✅ `write_audit_log(..., "freecad_export", {...})` on each export |
@@ -147,6 +152,8 @@ human-in-the-loop confirmation pattern.
 |------|-------|
 | Streaming events | Poll-based; SSE or WebSocket would enable live updates |
 | Real FreeCAD macro bridge | `freecad.run_macro` is still a skeleton; needs approval gate wired to a real execution path |
+| Mesh quality metrics | Not yet implemented — mesh generation produces `.inp` only; no quality report |
+| Field data endpoint | Extend `GET /projects/{id}/fields/{f}` to serve real VTK/HDF5 data (currently synthetic `y_normalized` with explicit "合成预览，不可用于工程判断" label) |
 | Solver field data endpoint | Extend `GET /projects/{id}/fields/{f}` to serve real VTK/HDF5 data |
 | MCP server adapter | `backend/app/mcp_server.py` wrapping `runtime.registered_tool_names()` |
 | Multi-step plan with dependencies | Steps execute sequentially; parallel/conditional is future |

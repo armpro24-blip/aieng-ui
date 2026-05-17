@@ -319,6 +319,7 @@ export type SolverFieldDescriptor = {
   values?: number[] | null;
   node_coords?: [number, number, number][] | null;
   warnings?: string[] | null;
+  bbox_status?: "aligned" | "suspicious" | null;
 };
 
 export type RuntimeEventType =

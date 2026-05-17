@@ -24,7 +24,7 @@ Web workbench and FastAPI service for the `.aieng` engineering platform.
 `aieng-ui` is the **workbench**: the local FastAPI runtime + React SPA where the vertical CAE MVP actually executes. It owns the moving parts that `aieng` deliberately does not:
 
 - The runtime tool registry (table below) and the `POST /api/runtime/runs` orchestration entry point.
-- The **approval gate** — `cae.run_solver` is `requires_approval=True`; the runtime pauses before subprocess execution and exposes explicit `approve`/`reject` REST endpoints.
+- The **approval gate** — `cae.run_solver`, `cae.generate_mesh`, `cad.edit_parameter`, and `freecad.run_macro` are `requires_approval=True`; the runtime pauses before mutation or subprocess execution and exposes explicit `approve`/`reject` REST endpoints.
 - The **external CalculiX subprocess adapter** — `subprocess.run([ccx, …], shell=False)` with timeout, captured stdout/stderr/return code, and honest `converged: null` semantics. AIENG does not host a solver.
 - **Artifact write-back** into the `.aieng` package (atomic ZIP rewrite via temp file + `shutil.move`).
 - The **audit/event timeline** (`RuntimeEvent` sequence).
@@ -32,8 +32,9 @@ Web workbench and FastAPI service for the `.aieng` engineering platform.
 
 External agents (Claude Code, Codex, MCP clients) reach the workbench through `aieng_freecad_mcp`. For the reproducible end-to-end demo see [`docs/quickstart-vertical-cae-demo.md`](docs/quickstart-vertical-cae-demo.md).
 
-Sixteen registered runtime tools (15 working + 1 skeleton; `cae.run_solver`
-and `freecad.run_macro` are approval-gated):
+27 registered runtime tools (mutation / expensive operations are approval-gated).
+Honest status semantics: `skipped`, `partial`, `error`, and `completed` are never
+conflated. Key tools listed below; full registry available via `GET /api/runtime/tools`.
 
 | Tool | Status |
 |------|--------|
@@ -52,6 +53,8 @@ and `freecad.run_macro` are approval-gated):
 | `cae.extract_solver_results` | Working — parses CalculiX FRD and writes `computed_metrics.json` |
 | `cae.prepare_solver_run` | Working — preflight inspection, no solver execution |
 | `cae.run_solver` | Working — external CalculiX execution adapter MVP, approval-gated |
+| `cad.edit_parameter` | Working — FreeCAD parameter edit with honest executor selection (`auto`\|stub\|`macro`\|`rpc`). Stub mode returns `source="stub_mock"`, `status="partial"`. Approval-gated. |
+| `cae.generate_mesh` | Working — geometry ZIP unpack → FreeCAD/Gmsh mesh → `.inp` → atomic write-back. Returns `error/freecad_unavailable` when FreeCAD missing. Approval-gated. |
 | `freecad.run_macro` | Skeleton, approval-gated |
 
 External agents (Claude Code, Codex, custom MCP clients) can access all runtime tools via the MCP bridge in `aieng_freecad_mcp`. See [`../docs/runtime_and_agents.md`](../docs/runtime_and_agents.md).
@@ -67,6 +70,7 @@ they exist so a reviewer (or agent) can inspect what the runtime wrote.
 | `GET /api/projects/{project_id}/artifact?path=...` | Read a single artifact from the project's `.aieng` package. Returns `{path, exists, media_type, size_bytes?, parsed_json?, text?, warnings}`. JSON files are parsed when ≤ 2 MB; text files are inlined when ≤ 256 KB. Missing artifacts return `exists: false` with 200. Path traversal, absolute paths, and backslashes are rejected with 400. |
 | `POST /api/projects/{project_id}/artifact/diff` | Compute RFC-6901 JSON Pointer paths for differences between two JSON values supplied in the body as `{before, after}`. Returns `{changed_paths, added_paths, removed_paths}`. Pure computation; no package access. |
 | `POST /api/projects/{project_id}/solver-input` | Import a CalculiX `.inp` solver input deck into the package. Body: `{text, run_id?, overwrite?}`. Writes to `simulation/runs/{run_id}/solver_input.inp` (default `run_id` `"run_001"`). Minimal CalculiX keyword scan rejects obvious non-decks; missing `*NODE` / `*STEP` blocks are accepted with warnings. Import only — no mesh generation, no deck generation, no physical correctness validation. 10 MB cap. |
+| `POST /api/llm/test` | Test LLM provider configuration (`config_ready`) and optionally verify real API connectivity (`connection_verified`). Body: `{llm_config, verify_connection?}`. Never returns the API key. |
 
 Pair the two reads: capture a JSON artifact before an action, capture it again
 after, then POST both to `/artifact/diff` to surface the structural delta.

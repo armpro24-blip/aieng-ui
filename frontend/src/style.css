@@ -1755,3 +1755,23 @@ input[type="file"] {
   background: rgba(22, 101, 52, 0.14);
   color: #bbf7d0;
 }
+
+.test-result {
+  margin-top: 8px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.test-result.ok {
+  border: 1px solid rgba(74, 222, 128, 0.35);
+  background: rgba(22, 101, 52, 0.12);
+  color: #bbf7d0;
+}
+
+.test-result.error {
+  border: 1px solid rgba(248, 113, 113, 0.35);
+  background: rgba(127, 29, 29, 0.12);
+  color: #fecaca;
+}

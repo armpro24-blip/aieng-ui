@@ -304,6 +304,109 @@ def llm_agent_plan(
     return steps, warnings, str(parsed.get("reply") or "I built a guarded agent plan."), raw
 
 
+def test_llm_provider(
+    settings: Any,
+    llm_config: dict[str, Any],
+    *,
+    verify_connection: bool = False,
+) -> dict[str, Any]:
+    """Test LLM provider configuration and optionally verify API connectivity.
+
+    Returns:
+        Dict with ``config_ready``, ``connection_verified``, ``api_key_present``,
+        and ``error_message``. Never includes the actual API key.
+    """
+    provider_name = str(llm_config.get("provider") or "openai-compatible")
+    model = str(llm_config.get("model") or "configured-model")
+    base_url = llm_config.get("base_url")
+    api_key_env = llm_config.get("api_key_env")
+
+    # Step 1: Check API key presence
+    src = settings.aieng_root / "src"
+    candidate, injected = _inject_path(src)
+    try:
+        from aieng.benchmarking.providers import ProviderConfig
+
+        config = ProviderConfig(
+            provider=provider_name,
+            model=model,
+            api_key_env=api_key_env,
+            base_url=base_url,
+        )
+        api_key = config.resolved_api_key()
+        if not api_key:
+            return {
+                "config_ready": False,
+                "connection_verified": False,
+                "provider": provider_name,
+                "model": model,
+                "base_url": base_url,
+                "api_key_present": False,
+                "error_message": f"Environment variable {api_key_env or 'OPENAI_API_KEY'} not set",
+            }
+    finally:
+        _remove_path(candidate, injected)
+
+    # Step 2: Validate config structure (can we build the provider?)
+    try:
+        provider = _build_provider(settings, llm_config)
+    except Exception as exc:
+        return {
+            "config_ready": False,
+            "connection_verified": False,
+            "provider": provider_name,
+            "model": model,
+            "base_url": base_url,
+            "api_key_present": True,
+            "error_message": f"Invalid config: {exc}",
+        }
+
+    if not verify_connection:
+        return {
+            "config_ready": True,
+            "connection_verified": False,
+            "provider": provider_name,
+            "model": model,
+            "base_url": base_url,
+            "api_key_present": True,
+            "error_message": None,
+        }
+
+    # Step 3: Real API connectivity test (lightweight)
+    try:
+        if provider_name.lower() == "anthropic":
+            provider.client.messages.create(
+                model=model,
+                max_tokens=1,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        else:
+            provider.client.chat.completions.create(
+                model=model,
+                max_tokens=1,
+                messages=[{"role": "user", "content": "hi"}],
+            )
+        return {
+            "config_ready": True,
+            "connection_verified": True,
+            "provider": provider_name,
+            "model": model,
+            "base_url": base_url,
+            "api_key_present": True,
+            "error_message": None,
+        }
+    except Exception as exc:
+        return {
+            "config_ready": True,
+            "connection_verified": False,
+            "provider": provider_name,
+            "model": model,
+            "base_url": base_url,
+            "api_key_present": True,
+            "error_message": f"API call failed: {exc}",
+        }
+
+
 def build_agent_plan(
     *,
     settings: Any,

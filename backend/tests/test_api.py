@@ -1,4 +1,5 @@
 ﻿import json
+import os
 import shutil
 import zipfile
 from pathlib import Path
@@ -3292,6 +3293,92 @@ def test_cad_edit_parameter_rejects_out_of_bounds_after_approval(tmp_path: Path)
     assert "below min_value" in result["message"]
 
 
+def test_cad_edit_parameter_stub_returns_partial(monkeypatch, tmp_path: Path) -> None:
+    """Stub source must be downgraded to partial (not completed) with honest warning."""
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("cad-edit-stub"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "cad-edit.aieng"
+    _make_cad_parameter_package(pkg_path)
+    project["aieng_file"] = "cad-edit.aieng"
+    save_project(settings, project)
+
+    def fake_stub_edit_parameter(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "status": "success",
+            "source": "stub_mock",
+            "summary": {},
+            "artifacts_written": [],
+            "warnings": ["stub warning"],
+            "errors": [],
+        }
+
+    monkeypatch.setattr("app.freecad_bridge.edit_parameter", fake_stub_edit_parameter)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "edit cad parameter",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "feature_id": "feat_base_001",
+            "parameter_name": "thickness_mm",
+            "new_value": 8.0,
+        },
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "awaiting_approval"
+
+    approve = client.post(f"/api/runtime/runs/{run['run_id']}/approve")
+    assert approve.status_code == 200
+    result = approve.json()["tool_results"][0]["output"]
+    assert result["status"] == "partial"
+    assert result["source"] == "stub_mock"
+    assert result["package_geometry_path"] is None
+    assert any("stub" in w.lower() for w in result["warnings"])
+
+
+def test_cad_edit_parameter_auto_fails_without_freecad(monkeypatch, tmp_path: Path) -> None:
+    """auto mode without FreeCADCmd must honest-fail, not fallback to stub."""
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("cad-edit-auto-fail"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "cad-edit.aieng"
+    _make_cad_parameter_package(pkg_path)
+    project["aieng_file"] = "cad-edit.aieng"
+    save_project(settings, project)
+
+    monkeypatch.setenv("AIENG_FREECAD_EXECUTOR", "auto")
+    # freecad_cmd in test settings already points to a non-existent path
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "edit cad parameter",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "feature_id": "feat_base_001",
+            "parameter_name": "thickness_mm",
+            "new_value": 8.0,
+        },
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "awaiting_approval"
+
+    approve = client.post(f"/api/runtime/runs/{run['run_id']}/approve")
+    assert approve.status_code == 200
+    result = approve.json()["tool_results"][0]["output"]
+    assert result["status"] == "error"
+    assert result["code"] == "bridge_error"
+    assert "FreeCAD" in result["message"]
+
+
 # ---------------------------------------------------------------------------
 # cae.write_mesh_handoff
 # ---------------------------------------------------------------------------
@@ -5458,3 +5545,345 @@ def test_solver_input_imported_deck_is_visible_via_artifact_api(tmp_path: Path) 
     assert body["exists"] is True
     assert body["media_type"] == "text/plain"
     assert body["text"] == deck
+
+
+def test_llm_test_endpoint_config_ready_without_key(tmp_path: Path) -> None:
+    """/api/llm/test returns config_ready=False when API key env is missing."""
+    from app.main import Settings, create_app
+    from starlette.testclient import TestClient
+
+    settings = Settings(
+        platform_root=tmp_path / "platform",
+        workspace_root=tmp_path / "workspace",
+        data_root=tmp_path / "data",
+        aieng_root=_WORKSPACE_ROOT / "aieng",
+        freecad_mcp_root=_WORKSPACE_ROOT / "aieng_freecad_mcp",
+        freecad_home=tmp_path / "freecad",
+        sample_step=tmp_path / "sample.step",
+    )
+    app = create_app(settings)
+    client = TestClient(app)
+
+    resp = client.post("/api/llm/test", json={
+        "llm_config": {"provider": "openai-compatible", "model": "gpt-4o", "api_key_env": "NONEXISTENT_KEY_XYZ"},
+        "verify_connection": False,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["config_ready"] is False
+    assert data["api_key_present"] is False
+    assert data["connection_verified"] is False
+    assert "NONEXISTENT_KEY_XYZ" in data["error_message"]
+
+
+def test_llm_test_endpoint_no_api_key_in_response(tmp_path: Path) -> None:
+    """/api/llm/test must never expose the API key in the response."""
+    from app.main import Settings, create_app
+    from starlette.testclient import TestClient
+
+    settings = Settings(
+        platform_root=tmp_path / "platform",
+        workspace_root=tmp_path / "workspace",
+        data_root=tmp_path / "data",
+        aieng_root=_WORKSPACE_ROOT / "aieng",
+        freecad_mcp_root=_WORKSPACE_ROOT / "aieng_freecad_mcp",
+        freecad_home=tmp_path / "freecad",
+        sample_step=tmp_path / "sample.step",
+    )
+    app = create_app(settings)
+    client = TestClient(app)
+
+    resp = client.post("/api/llm/test", json={
+        "llm_config": {
+            "provider": "openai-compatible",
+            "model": "gpt-4o",
+            "api_key_env": "OPENAI_API_KEY",
+            "api_key": "sk-secret123",
+        },
+        "verify_connection": False,
+    })
+    assert resp.status_code == 200
+    data = resp.json()
+    response_text = json.dumps(data)
+    assert "sk-secret123" not in response_text
+
+
+def test_llm_test_endpoint_missing_config_returns_400(tmp_path: Path) -> None:
+    """/api/llm/test returns 400 when llm_config is missing."""
+    from app.main import Settings, create_app
+    from starlette.testclient import TestClient
+
+    settings = Settings(
+        platform_root=tmp_path / "platform",
+        workspace_root=tmp_path / "workspace",
+        data_root=tmp_path / "data",
+        aieng_root=_WORKSPACE_ROOT / "aieng",
+        freecad_mcp_root=_WORKSPACE_ROOT / "aieng_freecad_mcp",
+        freecad_home=tmp_path / "freecad",
+        sample_step=tmp_path / "sample.step",
+    )
+    app = create_app(settings)
+    client = TestClient(app)
+
+    resp = client.post("/api/llm/test", json={})
+    assert resp.status_code == 400
+
+
+def test_cae_generate_mesh_registered_with_approval() -> None:
+    """cae.generate_mesh must be registered and require approval."""
+    from app import runtime as _rt
+    assert "cae.generate_mesh" in _rt.registered_tool_names()
+    meta = [t for t in _rt.registered_tools_info() if t["name"] == "cae.generate_mesh"][0]
+    assert meta["requires_approval"] is True
+
+
+def test_cae_generate_mesh_requires_approval(tmp_path: Path) -> None:
+    """cae.generate_mesh must pause at approval gate."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("mesh-approval"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "mesh.aieng"
+    _make_setup_package(pkg_path, extra={"geometry/source.step": "ISO-10303-21;\nEND-ISO-10303-21;\n"})
+    project["aieng_file"] = "mesh.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "generate mesh",
+        "project_id": project_id,
+        "tool_input": {"project_id": project_id, "mesh_size_mm": 3.0},
+    })
+    assert resp.status_code == 200
+    assert resp.json()["status"] == "awaiting_approval"
+
+
+def test_cae_generate_mesh_unpacks_geometry_from_zip(tmp_path: Path) -> None:
+    """Geometry must be extracted from the .aieng ZIP, not assumed on disk.
+
+    When FreeCAD is unavailable the tool must return error, not completed.
+    """
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("mesh-unpack"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "mesh.aieng"
+    _make_setup_package(pkg_path, extra={"geometry/source.step": "ISO-10303-21;\nEND-ISO-10303-21;\n"})
+    project["aieng_file"] = "mesh.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "generate mesh",
+        "project_id": project_id,
+        "tool_input": {"project_id": project_id, "mesh_size_mm": 3.0},
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    approve = client.post(f"/api/runtime/runs/{run['run_id']}/approve")
+    assert approve.status_code == 200
+    result = approve.json()["tool_results"][0]["output"]
+    # FreeCAD is not installed in CI → honest error
+    assert result["ok"] is False
+    assert result["status"] == "error"
+    assert result["code"] == "freecad_unavailable"
+    assert result["unpacked_geometry"] is not None
+
+
+def test_cae_generate_mesh_missing_geometry_returns_error(tmp_path: Path) -> None:
+    """Missing geometry must return error, not mock success."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("mesh-no-geom"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "mesh.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "mesh.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "generate mesh",
+        "project_id": project_id,
+        "tool_input": {"project_id": project_id, "mesh_size_mm": 3.0},
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    approve = client.post(f"/api/runtime/runs/{run['run_id']}/approve")
+    assert approve.status_code == 200
+    result = approve.json()["tool_results"][0]["output"]
+    assert result["status"] == "error"
+    assert result["code"] == "missing_geometry"
+
+
+# ---------------------------------------------------------------------------
+# PR 3B: cae.generate_mesh integration tests
+# ---------------------------------------------------------------------------
+
+_REAL_FREECAD_STEP = _WORKSPACE_ROOT / "aieng_freecad_mcp" / "examples" / "parametric_bracket" / "freecad" / "source.step"
+
+
+def _resolve_freecad_cmd() -> Path | None:
+    """Find a usable FreeCADCmd executable for integration tests."""
+    # 1. Explicit env override
+    env_path = os.environ.get("FREECAD_CMD")
+    if env_path:
+        p = Path(env_path)
+        if p.exists():
+            return p
+    # 2. Common installation paths (Windows)
+    candidates = [
+        Path(r"C:\Program Files\FreeCAD 1.0\bin\FreeCADCmd.exe"),
+        Path(r"C:\Program Files\FreeCAD 0.21\bin\FreeCADCmd.exe"),
+        Path(r"C:\Program Files\FreeCAD\bin\FreeCADCmd.exe"),
+        Path.home() / "AppData" / "Local" / "Programs" / "FreeCAD" / "bin" / "FreeCADCmd.exe",
+    ]
+    for c in candidates:
+        if c.exists():
+            return c
+    # 3. PATH lookup
+    found = shutil.which("FreeCADCmd.exe") or shutil.which("FreeCADCmd")
+    if found:
+        return Path(found)
+    return None
+
+
+_FREECAD_CMD = _resolve_freecad_cmd()
+_REAL_FREECAD_AVAILABLE = (
+    os.environ.get("AIENG_TEST_REAL_FREECAD") == "1"
+    and _FREECAD_CMD is not None
+    and _FREECAD_CMD.exists()
+    and _REAL_FREECAD_STEP.exists()
+)
+
+
+@pytest.mark.skipif(
+    not _REAL_FREECAD_AVAILABLE,
+    reason="Set AIENG_TEST_REAL_FREECAD=1 and ensure FreeCADCmd is on PATH or FREECAD_CMD is set",
+)
+def test_cae_generate_mesh_real_freecad_integration(tmp_path: Path) -> None:
+    """End-to-end: geometry ZIP unpack → FreeCAD/Gmsh mesh → atomic write-back.
+
+    Requires real FreeCAD + Gmsh installation.
+    """
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    # Override freecad_home so freecad_cmd resolves to the real executable
+    settings.freecad_home = _FREECAD_CMD.parents[1]  # bin/FreeCADCmd.exe → home
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("mesh-real"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "mesh.aieng"
+
+    # Inject real STEP geometry into the .aieng package
+    step_bytes = _REAL_FREECAD_STEP.read_bytes()
+    _make_setup_package(pkg_path, extra={"geometry/source.step": step_bytes})
+    project["aieng_file"] = "mesh.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "generate mesh",
+        "project_id": project_id,
+        "tool_input": {"project_id": project_id, "mesh_size_mm": 3.0, "element_type": "tetrahedral", "output_format": "inp"},
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "awaiting_approval"
+
+    approve = client.post(f"/api/runtime/runs/{run['run_id']}/approve")
+    assert approve.status_code == 200
+    result = approve.json()["tool_results"][0]["output"]
+
+    # 1. Must report completed
+    assert result["ok"] is True
+    assert result["status"] == "completed"
+    assert result["tool"] == "cae.generate_mesh"
+
+    # 2. Must have written mesh into .aieng package
+    assert result["mesh_artifact_path"] is not None
+    assert result["mesh_artifact_path"].startswith("simulation/mesh/")
+    assert result["mesh_metadata_path"] == "simulation/mesh/mesh_metadata.json"
+
+    # 3. ZIP must contain the mesh file and metadata
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        namelist = zf.namelist()
+        mesh_names = [n for n in namelist if n.startswith("simulation/mesh/") and n.endswith(".inp")]
+        assert len(mesh_names) >= 1, f"No .inp mesh found in ZIP: {namelist}"
+        assert "simulation/mesh/mesh_metadata.json" in namelist
+        meta = json.loads(zf.read("simulation/mesh/mesh_metadata.json"))
+
+    # 4. Metadata must be complete and honest
+    assert meta["schema_version"] == "0.1"
+    assert meta["mesh_size_mm"] == 3.0
+    assert meta["element_type"] == "tetrahedral"
+    assert meta["output_format"] == "inp"
+    assert "source_geometry" in meta
+    assert Path(meta["source_geometry"]).exists() is True
+    assert "generated_at" in meta
+    assert "mesh_file" in meta
+
+    # 5. Must NOT have written fake artifacts
+    assert "results/computed_metrics.json" not in namelist
+    assert "results/field_summary.json" not in namelist
+
+
+def test_cae_generate_mesh_no_freecad_returns_error(tmp_path: Path) -> None:
+    """When FreeCADCmd does not exist the tool must return error, not completed.
+
+    This guards against accidentally faking success in CI or fresh clones.
+    """
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    # freecad_home points to a non-existent directory → freecad_cmd missing
+    assert not settings.freecad_cmd.exists()
+
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("mesh-no-fc"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "mesh.aieng"
+    _make_setup_package(pkg_path, extra={"geometry/source.step": "ISO-10303-21;\nEND-ISO-10303-21;\n"})
+    project["aieng_file"] = "mesh.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "generate mesh",
+        "project_id": project_id,
+        "tool_input": {"project_id": project_id, "mesh_size_mm": 3.0},
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    approve = client.post(f"/api/runtime/runs/{run['run_id']}/approve")
+    assert approve.status_code == 200
+    result = approve.json()["tool_results"][0]["output"]
+
+    # Must be honest error
+    assert result["ok"] is False
+    assert result["status"] == "error"
+    assert result["code"] == "freecad_unavailable"
+    assert "FreeCAD" in result["message"] or "freecad" in result["message"].lower()
+
+    # Must NOT write fake mesh artifacts into the package
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        namelist = zf.namelist()
+    mesh_names = [n for n in namelist if n.startswith("simulation/mesh/")]
+    assert len(mesh_names) == 0, f"Unexpected mesh artifacts written: {mesh_names}"

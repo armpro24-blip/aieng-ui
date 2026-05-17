@@ -34,6 +34,20 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }),
+  testLlmProvider: (config: LLMConfig, verifyConnection: boolean) =>
+    request<{
+      config_ready: boolean;
+      connection_verified: boolean;
+      provider: string;
+      model: string;
+      base_url?: string | null;
+      api_key_present: boolean;
+      error_message: string | null;
+    }>("/api/llm/test", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ llm_config: config, verify_connection: verifyConnection }),
+    }),
   listCapabilities: () => request<CapabilityDescriptor[]>("/api/capabilities"),
   previewCapability: (operationName: string, inputs: Record<string, unknown> = {}, approved = false) =>
     request<CapabilityPreview>("/api/capabilities/preview", {

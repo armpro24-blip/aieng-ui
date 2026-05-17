@@ -345,6 +345,153 @@ function applyYNormalizedColors(object: THREE.Object3D, colormap?: string | null
   return applied;
 }
 
+type UniformGrid = {
+  cellSize: number;
+  minX: number;
+  minY: number;
+  minZ: number;
+  cells: Map<string, number[]>;
+};
+
+function buildUniformGrid(nodeCoords: [number, number, number][]): UniformGrid {
+  if (nodeCoords.length === 0) {
+    return { cellSize: 1, minX: 0, minY: 0, minZ: 0, cells: new Map() };
+  }
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const [x, y, z] of nodeCoords) {
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+    minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+  }
+  const dx = maxX - minX, dy = maxY - minY, dz = maxZ - minZ;
+  const diagonal = Math.sqrt(dx * dx + dy * dy + dz * dz);
+  const cellSize = Math.max(diagonal / Math.sqrt(nodeCoords.length), 1e-6);
+
+  const cells = new Map<string, number[]>();
+  for (let i = 0; i < nodeCoords.length; i++) {
+    const [x, y, z] = nodeCoords[i];
+    const ix = Math.floor((x - minX) / cellSize);
+    const iy = Math.floor((y - minY) / cellSize);
+    const iz = Math.floor((z - minZ) / cellSize);
+    const key = `${ix},${iy},${iz}`;
+    if (!cells.has(key)) cells.set(key, []);
+    cells.get(key)!.push(i);
+  }
+  return { cellSize, minX, minY, minZ, cells };
+}
+
+function nearestNodeIndex(
+  vx: number,
+  vy: number,
+  vz: number,
+  grid: UniformGrid,
+  nodeCoords: [number, number, number][],
+): number {
+  const { cellSize, minX, minY, minZ, cells } = grid;
+  const ix = Math.floor((vx - minX) / cellSize);
+  const iy = Math.floor((vy - minY) / cellSize);
+  const iz = Math.floor((vz - minZ) / cellSize);
+
+  let bestIdx = -1;
+  let bestDist = Infinity;
+  let searchRadius = 1;
+
+  while (searchRadius <= 3) {
+    let foundAny = false;
+    for (let dx = -searchRadius; dx <= searchRadius; dx++) {
+      for (let dy = -searchRadius; dy <= searchRadius; dy++) {
+        for (let dz = -searchRadius; dz <= searchRadius; dz++) {
+          if (searchRadius > 1 && Math.abs(dx) < searchRadius && Math.abs(dy) < searchRadius && Math.abs(dz) < searchRadius) {
+            continue;
+          }
+          const key = `${ix + dx},${iy + dy},${iz + dz}`;
+          const indices = cells.get(key);
+          if (!indices) continue;
+          foundAny = true;
+          for (const idx of indices) {
+            const [nx, ny, nz] = nodeCoords[idx];
+            const d = (vx - nx) ** 2 + (vy - ny) ** 2 + (vz - nz) ** 2;
+            if (d < bestDist) {
+              bestDist = d;
+              bestIdx = idx;
+            }
+          }
+        }
+      }
+    }
+    if (bestIdx !== -1) break;
+    if (!foundAny && searchRadius >= 3) break;
+    searchRadius++;
+  }
+
+  if (bestIdx === -1) {
+    for (let i = 0; i < nodeCoords.length; i++) {
+      const [nx, ny, nz] = nodeCoords[i];
+      const d = (vx - nx) ** 2 + (vy - ny) ** 2 + (vz - nz) ** 2;
+      if (d < bestDist) {
+        bestDist = d;
+        bestIdx = i;
+      }
+    }
+  }
+  return bestIdx;
+}
+
+function checkBboxAlignment(
+  nodeCoords: [number, number, number][],
+  object: THREE.Object3D,
+): { status: "aligned" | "suspicious"; reason?: string } {
+  const meshBox = new THREE.Box3().setFromObject(object);
+  if (meshBox.isEmpty()) return { status: "suspicious", reason: "Mesh bbox empty" };
+
+  let minX = Infinity, minY = Infinity, minZ = Infinity;
+  let maxX = -Infinity, maxY = -Infinity, maxZ = -Infinity;
+  for (const [x, y, z] of nodeCoords) {
+    minX = Math.min(minX, x); maxX = Math.max(maxX, x);
+    minY = Math.min(minY, y); maxY = Math.max(maxY, y);
+    minZ = Math.min(minZ, z); maxZ = Math.max(maxZ, z);
+  }
+
+  const frdCenter = new THREE.Vector3((minX + maxX) / 2, (minY + maxY) / 2, (minZ + maxZ) / 2);
+  const meshCenter = new THREE.Vector3();
+  meshBox.getCenter(meshCenter);
+  const frdSize = new THREE.Vector3(maxX - minX, maxY - minY, maxZ - minZ);
+  const meshSize = new THREE.Vector3();
+  meshBox.getSize(meshSize);
+
+  const effectiveMeshSize = new THREE.Vector3(
+    meshSize.x < 1e-6 ? 1 : meshSize.x,
+    meshSize.y < 1e-6 ? 1 : meshSize.y,
+    meshSize.z < 1e-6 ? 1 : meshSize.z,
+  );
+
+  const centerDist = frdCenter.distanceTo(meshCenter);
+  const meshDiagonal = Math.sqrt(
+    effectiveMeshSize.x ** 2 + effectiveMeshSize.y ** 2 + effectiveMeshSize.z ** 2,
+  );
+  if (meshDiagonal === 0) return { status: "suspicious", reason: "Mesh has zero size" };
+
+  if (centerDist / meshDiagonal > 0.5) {
+    return {
+      status: "suspicious",
+      reason: `Center offset ${(centerDist / meshDiagonal * 100).toFixed(1)}% of diagonal`,
+    };
+  }
+
+  const sizeRatioX = frdSize.x / (meshSize.x || 1);
+  const sizeRatioY = frdSize.y / (meshSize.y || 1);
+  const sizeRatioZ = frdSize.z / (meshSize.z || 1);
+  if (
+    sizeRatioX < 0.01 || sizeRatioX > 100 ||
+    sizeRatioY < 0.01 || sizeRatioY > 100 ||
+    sizeRatioZ < 0.01 || sizeRatioZ > 100
+  ) {
+    return { status: "suspicious", reason: "Size ratio out of bounds" };
+  }
+  return { status: "aligned" };
+}
+
 function applyFieldColors(
   object: THREE.Object3D,
   values: number[],
@@ -352,9 +499,14 @@ function applyFieldColors(
   minVal: number,
   maxVal: number,
   colormap?: string | null,
-): boolean {
+): { applied: boolean; bboxStatus: "aligned" | "suspicious" | null; warnings: string[] } {
   let applied = false;
+  const warnings: string[] = [];
   const valueRange = maxVal > minVal ? maxVal - minVal : 1;
+
+  const grid = buildUniformGrid(nodeCoords);
+  const bboxCheck = checkBboxAlignment(nodeCoords, object);
+
   object.traverse((node) => {
     if (!(node instanceof THREE.Mesh)) return;
     const geo = node.geometry as THREE.BufferGeometry;
@@ -365,19 +517,7 @@ function applyFieldColors(
       const vx = pos.getX(i);
       const vy = pos.getY(i);
       const vz = pos.getZ(i);
-      // Nearest-neighbour lookup against FRD node coordinates
-      let bestIdx = 0;
-      let bestDist = Infinity;
-      for (let j = 0; j < nodeCoords.length; j++) {
-        const dx = vx - nodeCoords[j][0];
-        const dy = vy - nodeCoords[j][1];
-        const dz = vz - nodeCoords[j][2];
-        const dist = dx * dx + dy * dy + dz * dz;
-        if (dist < bestDist) {
-          bestDist = dist;
-          bestIdx = j;
-        }
-      }
+      const bestIdx = nearestNodeIndex(vx, vy, vz, grid, nodeCoords);
       const val = values[bestIdx] ?? minVal;
       const t = (val - minVal) / valueRange;
       const col = sampleColormap(t, colormap);
@@ -389,7 +529,8 @@ function applyFieldColors(
     node.material = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.1, roughness: 0.65 });
     applied = true;
   });
-  return applied;
+  if (bboxCheck.reason) warnings.push(bboxCheck.reason);
+  return { applied, bboxStatus: bboxCheck.status, warnings };
 }
 
 function fitCameraToObject(
@@ -501,7 +642,7 @@ function ModelViewer({
         fieldDescriptor.values &&
         fieldDescriptor.node_coords
       ) {
-        applyFieldColors(
+        const { applied, bboxStatus, warnings } = applyFieldColors(
           nextObject,
           fieldDescriptor.values,
           fieldDescriptor.node_coords,
@@ -509,16 +650,36 @@ function ModelViewer({
           fieldDescriptor.max_value,
           fieldDescriptor.colormap,
         );
+        if (applied && fieldDescriptor) {
+          fieldDescriptor.bbox_status = bboxStatus;
+          if (warnings.length && fieldDescriptor.warnings) {
+            fieldDescriptor.warnings.push(...warnings);
+          } else if (warnings.length) {
+            fieldDescriptor.warnings = warnings;
+          }
+        }
       }
       scene.add(nextObject);
       if (!fitCameraToObject(camera, controls, nextObject)) {
         setSafeViewerState("error", "预览资产缺少可用的几何边界，无法定位相机");
         return;
       }
-      const fieldNote = fieldDescriptor
-        ? ` · ${fieldLabel(fieldDescriptor.field_name)} overlay${fieldDescriptor.source === "frd" ? " (FRD真实数据)" : ""}`
-        : "";
-      setSafeViewerState("ready", `真实预览资产已加载${fieldNote}`);
+      const fieldNote = (() => {
+        if (!fieldDescriptor) return "";
+        const label = fieldLabel(fieldDescriptor.field_name);
+        if (fieldDescriptor.source === "frd") {
+          if (fieldDescriptor.bbox_status === "suspicious") {
+            return ` · ${label} overlay (FRD数据存在，但几何坐标可能不一致)`;
+          }
+          return ` · ${label} overlay (FRD真实数据)`;
+        }
+        return ` · ${label} overlay (合成预览，不可用于工程判断)`;
+      })();
+      if (fieldDescriptor?.bbox_status === "suspicious") {
+        setSafeViewerState("ready", `真实预览资产已加载${fieldNote} — 警告：FRD 坐标与几何不匹配`);
+      } else {
+        setSafeViewerState("ready", `真实预览资产已加载${fieldNote}`);
+      }
     };
 
     if (assetUrl && resolvedFormat) {
@@ -625,6 +786,7 @@ type LlmProviderSettingsProps = {
   onChange<K extends keyof LLMConfig>(key: K, value: LLMConfig[K]): void;
   onPreset(provider: string): void;
   onRestore(): void;
+  onTestResult?(status: "config_ok" | "conn_ok" | "error", message: string): void;
 };
 
 function LlmProviderSettings({
@@ -633,7 +795,59 @@ function LlmProviderSettings({
   onChange,
   onPreset,
   onRestore,
+  onTestResult,
 }: LlmProviderSettingsProps) {
+  const [testStatus, setTestStatus] = useState<"idle" | "testing_config" | "testing_conn" | "config_ok" | "conn_ok" | "error">("idle");
+  const [testMessage, setTestMessage] = useState("");
+
+  async function handleTestConfig() {
+    setTestStatus("testing_config");
+    setTestMessage("");
+    try {
+      const result = await api.testLlmProvider(llmConfig, false);
+      if (result.config_ready) {
+        setTestStatus("config_ok");
+        setTestMessage("配置可用 ✓");
+        onTestResult?.("config_ok", "配置可用 ✓");
+      } else {
+        setTestStatus("error");
+        setTestMessage(result.error_message || "配置不可用");
+        onTestResult?.("error", result.error_message || "配置不可用");
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setTestStatus("error");
+      setTestMessage(msg);
+      onTestResult?.("error", msg);
+    }
+  }
+
+  async function handleVerifyConnection() {
+    setTestStatus("testing_conn");
+    setTestMessage("");
+    try {
+      const result = await api.testLlmProvider(llmConfig, true);
+      if (result.connection_verified) {
+        setTestStatus("conn_ok");
+        setTestMessage("连接已验证 ✓");
+        onTestResult?.("conn_ok", "连接已验证 ✓");
+      } else if (!result.config_ready) {
+        setTestStatus("error");
+        setTestMessage(result.error_message || "配置不可用");
+        onTestResult?.("error", result.error_message || "配置不可用");
+      } else {
+        setTestStatus("error");
+        setTestMessage(result.error_message || "连接验证失败");
+        onTestResult?.("error", result.error_message || "连接验证失败");
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      setTestStatus("error");
+      setTestMessage(msg);
+      onTestResult?.("error", msg);
+    }
+  }
+
   return (
     <section className="drawer-section">
       <div className="drawer-section-heading">
@@ -732,7 +946,26 @@ function LlmProviderSettings({
         <button type="button" className="ghost-button" onClick={onRestore}>
           恢复 LLM 默认
         </button>
+        <button
+          type="button"
+          className="ghost-button"
+          onClick={handleTestConfig}
+          disabled={testStatus === "testing_config" || testStatus === "testing_conn"}
+        >
+          {testStatus === "testing_config" ? "检测中..." : "测试配置"}
+        </button>
+        <button
+          type="button"
+          className="ghost-button"
+          onClick={handleVerifyConnection}
+          disabled={testStatus === "testing_config" || testStatus === "testing_conn"}
+        >
+          {testStatus === "testing_conn" ? "验证中..." : "验证连接"}
+        </button>
       </div>
+      {testStatus === "config_ok" && <div className="test-result ok">{testMessage}</div>}
+      {testStatus === "conn_ok" && <div className="test-result ok">{testMessage}</div>}
+      {testStatus === "error" && <div className="test-result error">{testMessage}</div>}
     </section>
   );
 }
@@ -752,6 +985,7 @@ type RuntimeSettingsDrawerProps = {
   onLlmChange<K extends keyof LLMConfig>(key: K, value: LLMConfig[K]): void;
   onLlmPreset(provider: string): void;
   onLlmRestore(): void;
+  onLlmTestResult?(status: "config_ok" | "conn_ok" | "error", message: string): void;
   onTest(): void;
   onSave(): void;
   onRestore(): void;
@@ -772,6 +1006,7 @@ function RuntimeSettingsDrawer({
   onLlmChange,
   onLlmPreset,
   onLlmRestore,
+  onLlmTestResult,
   onTest,
   onSave,
   onRestore,
@@ -804,6 +1039,7 @@ function RuntimeSettingsDrawer({
             onChange={onLlmChange}
             onPreset={onLlmPreset}
             onRestore={onLlmRestore}
+            onTestResult={onLlmTestResult}
           />
 
           <section className="drawer-section">
@@ -1474,6 +1710,14 @@ export default function App() {
 
   function updateLlmConfig<K extends keyof LLMConfig>(key: K, value: LLMConfig[K]) {
     setLlmConfig((current) => ({ ...current, [key]: value }));
+  }
+
+  function handleLlmTestResult(status: "config_ok" | "conn_ok" | "error", message: string) {
+    if (status === "config_ok" || status === "conn_ok") {
+      setNotice({ tone: "success", title: "LLM 测试通过", detail: message });
+    } else {
+      setNotice({ tone: "error", title: "LLM 测试失败", detail: message });
+    }
   }
 
   function applyLlmProviderPreset(provider: string) {
@@ -3059,6 +3303,7 @@ export default function App() {
         onLlmChange={updateLlmConfig}
         onLlmPreset={applyLlmProviderPreset}
         onLlmRestore={restoreDefaultLlmConfig}
+        onLlmTestResult={handleLlmTestResult}
         onTest={() => void runRuntimeTask("test", () => api.testRuntimeConfig(runtimeDraft!))}
         onSave={() => void runRuntimeTask("save", () => api.updateRuntimeConfig(runtimeDraft!))}
         onRestore={restoreRuntimeDefaults}
