@@ -389,3 +389,59 @@ def import_solver_evidence(
                 sys.path.remove(candidate)
             except ValueError:
                 pass
+
+
+def write_evidence_scaffold(
+    package_path: str | Path,
+    *,
+    aieng_root: str | Path,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Write evidence scaffold (evidence_index.json + claim_map.json) into a .aieng package.
+
+    Imports ``aieng.results.evidence_writer.write_evidence_scaffold_package``
+    from ``aieng_root/src``. Raises RuntimeError if the import or write fails.
+
+    Args:
+        package_path: Path to the .aieng package.
+        aieng_root: Root of the aieng repo checkout.
+        overwrite: Whether to overwrite existing evidence scaffold files.
+
+    Returns:
+        Dict with status, package_path, and scaffold artifact paths.
+    """
+    pkg = Path(package_path)
+    if not pkg.exists():
+        raise FileNotFoundError(f"Package not found: {pkg}")
+
+    aieng_src = Path(aieng_root) / "src"
+    if not aieng_src.exists():
+        raise RuntimeError(f"aieng src not found at {aieng_src}")
+
+    injected = False
+    try:
+        candidate = str(aieng_src)
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            injected = True
+        from aieng.results.evidence_writer import write_evidence_scaffold_package  # type: ignore[import]
+
+        result_path = write_evidence_scaffold_package(pkg, overwrite=overwrite)
+        return {
+            "status": "ok",
+            "package_path": str(result_path),
+            "artifacts": [
+                {"path": "results/evidence_index.json", "kind": "evidence_index", "role": "evidence_catalog"},
+                {"path": "results/claim_map.json", "kind": "claim_map", "role": "claim_evidence_map"},
+            ],
+        }
+    except (FileNotFoundError, ValueError):
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to write evidence scaffold: {exc}") from exc
+    finally:
+        if injected:
+            try:
+                sys.path.remove(candidate)
+            except ValueError:
+                pass

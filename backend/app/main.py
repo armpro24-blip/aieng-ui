@@ -3319,9 +3319,74 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "artifacts": result.get("artifacts", []),
         }
 
+    def _tool_aieng_write_evidence_scaffold(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import aieng_bridge
+        from pathlib import Path as _Path
+
+        package_path_str: str | None = inp.get("packagePath") or inp.get("package_path")
+        project_id: str | None = inp.get("project_id")
+        overwrite: bool = bool(inp.get("overwrite", False))
+
+        if not package_path_str and project_id:
+            proj = get_project(active_settings, project_id)
+            pkg = resolve_project_path(active_settings, project_id, proj.get("aieng_file"))
+            if pkg is not None and pkg.exists():
+                package_path_str = str(pkg)
+
+        if not package_path_str:
+            return {
+                "ok": False,
+                "tool": "aieng.write_evidence_scaffold",
+                "status": "error",
+                "code": "missing_package_path",
+                "message": "No package path provided and no project_id could be resolved.",
+            }
+
+        package_path = _Path(package_path_str)
+        if not package_path.exists():
+            return {
+                "ok": False,
+                "tool": "aieng.write_evidence_scaffold",
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Package not found: {package_path_str}",
+            }
+
+        try:
+            result = aieng_bridge.write_evidence_scaffold(
+                package_path,
+                aieng_root=active_settings.aieng_root,
+                overwrite=overwrite,
+            )
+        except FileExistsError as exc:
+            return {
+                "ok": False,
+                "tool": "aieng.write_evidence_scaffold",
+                "status": "error",
+                "code": "scaffold_exists",
+                "message": str(exc),
+            }
+        except RuntimeError as exc:
+            return {
+                "ok": False,
+                "tool": "aieng.write_evidence_scaffold",
+                "status": "error",
+                "code": "scaffold_write_failed",
+                "message": str(exc),
+            }
+
+        return {
+            "ok": True,
+            "tool": "aieng.write_evidence_scaffold",
+            "status": "completed",
+            "package_path": str(package_path),
+            "artifacts": result.get("artifacts", []),
+        }
+
     def _tool_cae_import_solver_evidence(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
         from . import aieng_bridge
         from pathlib import Path as _Path
+        import zipfile as _zipfile
 
         package_path_str: str | None = inp.get("packagePath") or inp.get("package_path")
         project_id: str | None = inp.get("project_id")
@@ -3331,6 +3396,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         claim_support: list[str] = inp.get("claimSupport") or inp.get("claim_support") or ["claim_solver_result_001"]
         verification_status: str = inp.get("verificationStatus") or inp.get("verification_status") or "unverified"
         evidence_id: str | None = inp.get("evidenceId") or inp.get("evidence_id")
+        auto_scaffold: bool = bool(inp.get("autoScaffold", inp.get("auto_scaffold", True)))
 
         if not package_path_str and project_id:
             proj = get_project(active_settings, project_id)
@@ -3376,6 +3442,28 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "message": f"Result file not found: {result_file}",
             }
 
+        # Check if evidence scaffold is present; auto-create if requested
+        scaffold_created = False
+        if auto_scaffold:
+            try:
+                with _zipfile.ZipFile(package_path, "r") as zf:
+                    has_scaffold = (
+                        "results/evidence_index.json" in zf.namelist()
+                        and "results/claim_map.json" in zf.namelist()
+                    )
+            except Exception:
+                has_scaffold = False
+            if not has_scaffold:
+                try:
+                    aieng_bridge.write_evidence_scaffold(
+                        package_path,
+                        aieng_root=active_settings.aieng_root,
+                        overwrite=False,
+                    )
+                    scaffold_created = True
+                except Exception:
+                    pass
+
         try:
             result = aieng_bridge.import_solver_evidence(
                 package_path,
@@ -3404,7 +3492,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "message": str(exc),
             }
 
-        return {
+        out = {
             "ok": True,
             "tool": "cae.import_solver_evidence",
             "status": "completed",
@@ -3413,6 +3501,13 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "artifacts": result.get("artifacts", []),
             "summary": result.get("summary", {}),
         }
+        if scaffold_created:
+            out["scaffold_created"] = True
+            out.setdefault("warnings", []).append(
+                "Evidence scaffold was auto-created because results/evidence_index.json and/or "
+                "results/claim_map.json were missing."
+            )
+        return out
 
     def _tool_freecad_run_macro(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
         from . import freecad_bridge
@@ -3484,6 +3579,14 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         "aieng.read_audit_log",
         _tool_read_audit_log,
         description="Return the most recent audit log entries for this project",
+    )
+    _rt.register_tool(
+        "aieng.write_evidence_scaffold",
+        _tool_aieng_write_evidence_scaffold,
+        description=(
+            "Write evidence_index.json and claim_map.json scaffold into a .aieng package. "
+            "Required before importing external solver or mesh evidence."
+        ),
     )
     _rt.register_tool(
         "freecad.inspect_geometry",

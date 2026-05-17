@@ -2839,6 +2839,115 @@ def test_cae_import_solver_evidence_missing_result_file_returns_error(tmp_path: 
 
 
 # ---------------------------------------------------------------------------
+# aieng.write_evidence_scaffold
+# ---------------------------------------------------------------------------
+
+def test_aieng_write_evidence_scaffold_success(tmp_path: Path) -> None:
+    """aieng.write_evidence_scaffold creates evidence_index.json and claim_map.json."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("scaffold"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "scaffold.aieng"
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "scaffold.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "write evidence scaffold",
+        "project_id": project_id,
+        "tool_input": {"project_id": project_id},
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "completed"
+    result = run["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert any(a["path"] == "results/evidence_index.json" for a in result["artifacts"])
+    assert any(a["path"] == "results/claim_map.json" for a in result["artifacts"])
+
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        assert "results/evidence_index.json" in zf.namelist()
+        assert "results/claim_map.json" in zf.namelist()
+
+
+def test_aieng_write_evidence_scaffold_missing_package_returns_error(tmp_path: Path) -> None:
+    """aieng.write_evidence_scaffold returns error when package is missing."""
+    from app.main import create_app, default_project, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("scaffold-missing"))
+    project_id = project["id"]
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "write evidence scaffold",
+        "project_id": project_id,
+        "tool_input": {"project_id": project_id},
+    })
+    assert resp.status_code == 200
+    result = resp.json()["tool_results"][0]["output"]
+    assert result["ok"] is False
+    assert result["code"] == "missing_package_path"
+
+
+# ---------------------------------------------------------------------------
+# cae.import_solver_evidence auto-scaffold
+# ---------------------------------------------------------------------------
+
+def test_cae_import_solver_evidence_auto_scaffold_when_missing(tmp_path: Path) -> None:
+    """cae.import_solver_evidence auto-creates scaffold when it is missing."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("solver-ev-auto"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "solver-ev-auto.aieng"
+    # Use _make_setup_package which does NOT include evidence scaffold
+    _make_setup_package(pkg_path)
+    project["aieng_file"] = "solver-ev-auto.aieng"
+    save_project(settings, project)
+
+    result_file = tmp_path / "job.dat"
+    result_file.write_text(
+        "max von Mises stress = 250.0 MPa\n"
+        "maximum displacement = 1.23 mm\n",
+        encoding="utf-8",
+    )
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "import solver evidence",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "result_file": str(result_file),
+            "result_format": "calculix_dat",
+            "producer_tool": "calculix",
+        },
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "completed"
+    result = run["tool_results"][0]["output"]
+    assert result["ok"] is True
+    assert result.get("scaffold_created") is True
+    assert any("auto-created" in w for w in result.get("warnings", []))
+    assert any(a["path"] == "results/evidence_index.json" for a in result["artifacts"])
+
+
+# ---------------------------------------------------------------------------
 # cae.prepare_solver_run (Phase 20B)
 # ---------------------------------------------------------------------------
 

@@ -382,6 +382,15 @@ _INTENT_MAP: list[tuple[list[str], str, str]] = [
         "cae.import_solver_evidence",
         "Import an external solver result file as evidence into a .aieng package",
     ),
+    (
+        [
+            "write evidence scaffold", "evidence scaffold", "create evidence scaffold",
+            "init evidence", "setup evidence", "evidence scaffold",
+            "证据脚手架", "创建证据", "初始化证据",
+        ],
+        "aieng.write_evidence_scaffold",
+        "Write evidence_index.json and claim_map.json scaffold into a .aieng package",
+    ),
 ]
 
 
