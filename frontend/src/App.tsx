@@ -344,6 +344,53 @@ function applyYNormalizedColors(object: THREE.Object3D, colormap?: string | null
   return applied;
 }
 
+function applyFieldColors(
+  object: THREE.Object3D,
+  values: number[],
+  nodeCoords: [number, number, number][],
+  minVal: number,
+  maxVal: number,
+  colormap?: string | null,
+): boolean {
+  let applied = false;
+  const valueRange = maxVal > minVal ? maxVal - minVal : 1;
+  object.traverse((node) => {
+    if (!(node instanceof THREE.Mesh)) return;
+    const geo = node.geometry as THREE.BufferGeometry;
+    const pos = geo.attributes.position;
+    if (!pos) return;
+    const colors = new Float32Array(pos.count * 3);
+    for (let i = 0; i < pos.count; i++) {
+      const vx = pos.getX(i);
+      const vy = pos.getY(i);
+      const vz = pos.getZ(i);
+      // Nearest-neighbour lookup against FRD node coordinates
+      let bestIdx = 0;
+      let bestDist = Infinity;
+      for (let j = 0; j < nodeCoords.length; j++) {
+        const dx = vx - nodeCoords[j][0];
+        const dy = vy - nodeCoords[j][1];
+        const dz = vz - nodeCoords[j][2];
+        const dist = dx * dx + dy * dy + dz * dz;
+        if (dist < bestDist) {
+          bestDist = dist;
+          bestIdx = j;
+        }
+      }
+      const val = values[bestIdx] ?? minVal;
+      const t = (val - minVal) / valueRange;
+      const col = sampleColormap(t, colormap);
+      colors[i * 3] = col.r;
+      colors[i * 3 + 1] = col.g;
+      colors[i * 3 + 2] = col.b;
+    }
+    geo.setAttribute("color", new THREE.BufferAttribute(colors, 3));
+    node.material = new THREE.MeshStandardMaterial({ vertexColors: true, metalness: 0.1, roughness: 0.65 });
+    applied = true;
+  });
+  return applied;
+}
+
 function fitCameraToObject(
   camera: THREE.PerspectiveCamera,
   controls: { target: THREE.Vector3; update(): void },
@@ -394,6 +441,8 @@ function ModelViewer({
         fieldDescriptor.max_value,
         fieldDescriptor.unit ?? "",
         fieldDescriptor.source ?? "",
+        fieldDescriptor.values?.length ?? 0,
+        fieldDescriptor.node_coords?.length ?? 0,
       ].join("|")
     : "";
 
@@ -446,13 +495,28 @@ function ModelViewer({
       object3d = nextObject;
       if (fieldDescriptor?.basis === "y_normalized") {
         applyYNormalizedColors(nextObject, fieldDescriptor.colormap);
+      } else if (
+        fieldDescriptor?.format === "vertex_json" &&
+        fieldDescriptor.values &&
+        fieldDescriptor.node_coords
+      ) {
+        applyFieldColors(
+          nextObject,
+          fieldDescriptor.values,
+          fieldDescriptor.node_coords,
+          fieldDescriptor.min_value,
+          fieldDescriptor.max_value,
+          fieldDescriptor.colormap,
+        );
       }
       scene.add(nextObject);
       if (!fitCameraToObject(camera, controls, nextObject)) {
         setSafeViewerState("error", "预览资产缺少可用的几何边界，无法定位相机");
         return;
       }
-      const fieldNote = fieldDescriptor ? ` · ${fieldLabel(fieldDescriptor.field_name)} overlay` : "";
+      const fieldNote = fieldDescriptor
+        ? ` · ${fieldLabel(fieldDescriptor.field_name)} overlay${fieldDescriptor.source === "frd" ? " (FRD真实数据)" : ""}`
+        : "";
       setSafeViewerState("ready", `真实预览资产已加载${fieldNote}`);
     };
 
