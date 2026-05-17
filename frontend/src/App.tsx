@@ -75,7 +75,6 @@ const DEFAULT_LLM_CONFIG: LLMConfig = {
   input_price_per_million_tokens: null,
   output_price_per_million_tokens: null,
 };
-const EMPTY_CAE_FIELDS: string[] = [];
 
 const CONTROL_PANE_MODES: Array<{ id: ControlPaneMode; label: string; detail: string }> = [
   { id: "chat", label: "智能编排", detail: "对话、计划与审批" },
@@ -1292,32 +1291,18 @@ export default function App() {
     viewer: (summary as any)?.viewer ?? null,
   });
   const caeSummary = summary?.cae ?? null;
-  const caeFields = caeSummary?.available_fields ?? EMPTY_CAE_FIELDS;
+  const caeFields = caeSummary?.available_fields ?? [];
   const hasCaeContext = caeSummary?.present ?? false;
-  const hasCaeResultArtifacts = Boolean(
-    caeSummary?.results_available ||
-      (caeSummary?.result_evidence_count ?? 0) > 0 ||
-      caeSummary?.solver_fields?.some((field) => field.available && field.format === "vertex_json") ||
-      caeSummary?.artifact_detection?.has_results ||
-      caeSummary?.artifact_detection?.has_fields ||
-      caeSummary?.result_summary?.status.has_results ||
-      caeSummary?.result_summary?.status.has_fields,
-  );
-  const renderableCaeFields = useMemo(
-    () => (hasCaeResultArtifacts ? caeFields : []),
-    [caeFields, hasCaeResultArtifacts],
-  );
-  const activeFieldDescriptor = hasCaeResultArtifacts ? fieldDescriptor : null;
 
   useEffect(() => {
-    if (!renderableCaeFields.length) return;
-    if (!renderableCaeFields.includes(selectedCaeField)) {
-      setSelectedCaeField(renderableCaeFields[0]);
+    if (!caeFields.length) return;
+    if (!caeFields.includes(selectedCaeField)) {
+      setSelectedCaeField(caeFields[0]);
     }
-  }, [renderableCaeFields, selectedCaeField]);
+  }, [caeFields, selectedCaeField]);
 
   useEffect(() => {
-    if (!selectedId || !hasCaeResultArtifacts || !renderableCaeFields.length) {
+    if (!selectedId || !hasCaeContext) {
       setFieldDescriptor(null);
       return;
     }
@@ -1345,7 +1330,7 @@ export default function App() {
       })
       .catch(() => { if (!cancelled) setFieldDescriptor(null); });
     return () => { cancelled = true; };
-  }, [selectedId, selectedCaeField, hasCaeResultArtifacts, renderableCaeFields]);
+  }, [selectedId, selectedCaeField, hasCaeContext]);
 
   useEffect(() => {
     setChatHistory([]);
@@ -1888,11 +1873,9 @@ export default function App() {
                 <strong>模型预览</strong>
                 <span>{effectiveViewerFormat ? `当前预览：${effectiveViewerFormat.toUpperCase()}` : "导入后将在这里显示模型预览"}</span>
               </div>
-              <div className="viewer-stage-badge">
-                {activeFieldDescriptor ? `${fieldLabel(activeFieldDescriptor.field_name)} 场可视化` : effectiveViewerUrl ? "预览可用" : "等待生成"}
-              </div>
+              <div className="viewer-stage-badge">{effectiveViewerUrl ? "预览可用" : "等待生成"}</div>
             </div>
-            <ModelViewer assetUrl={effectiveViewerUrl} assetFormat={effectiveViewerFormat} fieldDescriptor={activeFieldDescriptor} />
+            <ModelViewer assetUrl={effectiveViewerUrl} assetFormat={effectiveViewerFormat} fieldDescriptor={fieldDescriptor} />
           </div>
 
           <div className="viewer-insights">
@@ -2604,54 +2587,35 @@ export default function App() {
                     <div><span>结果证据</span><strong>{caeSummary?.result_evidence_count ?? 0}</strong></div>
                   </div>
 
-                  <div className={hasCaeResultArtifacts ? "summary-note summary-primary" : "summary-note summary-muted"}>
-                    <strong>{hasCaeResultArtifacts ? "已检测到 CAE 结果证据" : "仅检测到 CAE 上下文"}</strong>
+                  <div className={caeSummary?.results_available ? "summary-note summary-primary" : "summary-note summary-muted"}>
+                    <strong>{caeSummary?.results_available ? "已检测到 CAE 结果证据" : "仅检测到 CAE 上下文"}</strong>
                     <p>
-                      {hasCaeResultArtifacts
-                        ? "当前项目包含可用于 CAE 可视层的结果或场数据。选择标量场后，3D 预览会叠加对应的结果颜色。"
+                      {caeSummary?.results_available
+                        ? "当前项目包含可用于后续 CAE 可视层的结果证据。此版先把字段、证据和约束整理进 UI，便于继续接入真正的 field renderer。"
                         : "当前项目包含分析目标、约束或外部 CAE 交接信息，但还没有可渲染的求解结果。UI 会优雅降级，不阻断现有 CAD 预览。"}
                     </p>
                   </div>
 
-                  {renderableCaeFields.length ? (
+                  {caeFields.length ? (
                     <div className="cae-field-shell">
                       <div className="cae-field-head">
                         <div>
-                          <strong>Scalar Field Visualization</strong>
-                          <span>
-                            {fieldDescriptor?.source === "frd"
-                              ? "使用 FRD 节点场数据映射到当前几何"
-                              : "使用结果契约提供的标量场描述渲染"}
-                          </span>
+                          <strong>Scalar Field</strong>
+                          <span>{caeSummary?.results_available ? "结果层已具备接线位" : "结果层等待外部求解写回"}</span>
                         </div>
                         <select value={selectedCaeField} onChange={(event) => setSelectedCaeField(event.target.value)}>
-                          {renderableCaeFields.map((field) => (
+                          {caeFields.map((field) => (
                             <option key={field} value={field}>
                               {fieldLabel(field)}
                             </option>
                           ))}
                         </select>
                       </div>
-                      <div className="cae-legend ready" />
+                      <div className={caeSummary?.results_available ? "cae-legend ready" : "cae-legend pending"} />
                       <div className="cae-legend-scale">
                         <span>{fieldDescriptor ? `${fieldDescriptor.min_value} ${fieldDescriptor.unit ?? ""}`.trim() : "Low"}</span>
                         <strong>{fieldLabel(selectedCaeField)}</strong>
                         <span>{fieldDescriptor ? `${fieldDescriptor.max_value} ${fieldDescriptor.unit ?? ""}`.trim() : "High"}</span>
-                      </div>
-                    </div>
-                  ) : hasCaeContext ? (
-                    <div className="cae-field-shell pending-result">
-                      <div className="cae-field-head">
-                        <div>
-                          <strong>Scalar Field Visualization</strong>
-                          <span>未检测到可渲染的 CAE 结果场，3D 视图保持 CAD-only 预览。</span>
-                        </div>
-                      </div>
-                      <div className="cae-legend pending" />
-                      <div className="cae-legend-scale">
-                        <span>No field</span>
-                        <strong>Awaiting solver output</strong>
-                        <span>CAD-only</span>
                       </div>
                     </div>
                   ) : null}

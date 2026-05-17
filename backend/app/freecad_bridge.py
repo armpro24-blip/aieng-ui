@@ -10,7 +10,6 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 from typing import Any
-import asyncio
 
 
 def _load_src(freecad_mcp_root: str | Path) -> None:
@@ -191,73 +190,3 @@ def export_computed_metrics(
         software=software,
         source_files=source_files or [],
     )
-
-
-def edit_parameter(
-    package_path: str | Path,
-    *,
-    feature_id: str,
-    parameter_name: str,
-    new_value: Any,
-    freecad_mcp_root: str | Path,
-    input_fcstd: str | Path | None = None,
-    artifact_output_dir: str | Path | None = None,
-) -> dict[str, Any]:
-    """Execute one guarded parameter edit through the freecad-mcp patch bridge.
-
-    The bridge validates the semantic feature/parameter mapping against the
-    package and executes via freecad-mcp's deterministic patch executor. The UI
-    runtime remains responsible for approval gating and package write-back.
-    """
-    _load_src(freecad_mcp_root)
-
-    try:
-        from freecad_mcp.aieng_bridge.context import load_aieng_context  # type: ignore[import]
-        from freecad_mcp.aieng_bridge.patch import (  # type: ignore[import]
-            execute_patch_plan,
-            parse_patch_proposal,
-        )
-        from freecad_mcp.aieng_bridge.stub_executor import StubFreecadExecutor  # type: ignore[import]
-    except ImportError as exc:
-        raise RuntimeError(
-            f"Cannot import freecad_mcp parameter-edit bridge from {Path(freecad_mcp_root) / 'src'!r}: {exc}"
-        ) from exc
-
-    patch = {
-        "patch_id": "cad_edit_parameter_runtime",
-        "operations": [
-            {
-                "operation": "modify_parameter",
-                "target_feature_id": feature_id,
-                "parameter_name": parameter_name,
-                "new_value": new_value,
-            }
-        ],
-    }
-    context = load_aieng_context(Path(package_path))
-    plan = parse_patch_proposal(patch)
-    executor = StubFreecadExecutor(context.feature_graph or {})
-
-    async def _run() -> Any:
-        return await execute_patch_plan(
-            plan,
-            executor,
-            context=context,
-            package_path=Path(package_path),
-            input_fcstd=Path(input_fcstd) if input_fcstd else None,
-            artifact_output_dir=Path(artifact_output_dir) if artifact_output_dir else None,
-            dry_run=False,
-            export_modified_step=True,
-            export_modified_fcstd=False,
-            persist_to_aieng=True,
-        )
-
-    summary = asyncio.run(_run())
-    payload = summary.model_dump(mode="json") if hasattr(summary, "model_dump") else dict(summary)
-    return {
-        "status": payload.get("status"),
-        "summary": payload,
-        "artifacts_written": payload.get("artifacts_written", []),
-        "warnings": payload.get("warnings", []),
-        "errors": payload.get("errors", []),
-    }
