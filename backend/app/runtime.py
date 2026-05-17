@@ -319,15 +319,6 @@ _INTENT_MAP: list[tuple[list[str], str, str]] = [
     ),
     (
         [
-            "edit cad parameter", "cad edit parameter", "edit parameter",
-            "modify cad parameter", "change feature parameter",
-            "parameter edit",
-        ],
-        "cad.edit_parameter",
-        "Edit one declared CAD feature parameter (requires explicit approval)",
-    ),
-    (
-        [
             "computed metrics", "generate computed metrics", "import computed metrics",
             "create computed_metrics.json", "normalize postprocessing metrics",
             "计算指标", "生成计算指标", "归一化指标",
