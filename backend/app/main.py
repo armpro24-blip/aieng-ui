@@ -1017,6 +1017,22 @@ _SETUP_STALE_ARTIFACTS = [
     "results/evidence_index.json",
     "results/postprocessing_summary.md",
 ]
+_GEOMETRY_STALE_ARTIFACTS = [
+    "geometry/topology_map.json",
+    "graph/aag.json",
+    "graph/feature_graph.json",
+    "objects/interface_graph.json",
+    "objects/object_registry.json",
+    "visual/annotation_layers.json",
+    "visual/model_manifest.json",
+    "simulation/mesh_handoff_contract.json",
+    "simulation/mesh/mesh_metadata.json",
+    "results/computed_metrics.json",
+    "results/field_regions.json",
+    "results/field_summary.json",
+    "results/field_summary.md",
+    *_SETUP_STALE_ARTIFACTS,
+]
 
 
 def _is_allowed_patch_path(p: str) -> bool:
@@ -1247,6 +1263,113 @@ def _compute_stale_artifacts(
         if art not in refreshed_set:
             stale.append(art)
     return stale
+
+
+def _feature_list_from_graph(feature_graph: dict[str, Any]) -> list[dict[str, Any]]:
+    features = feature_graph.get("features", [])
+    if isinstance(features, dict):
+        return [v for v in features.values() if isinstance(v, dict)]
+    if isinstance(features, list):
+        return [v for v in features if isinstance(v, dict)]
+    return []
+
+
+def _validate_cad_parameter_edit_contract(
+    package_path: Path,
+    feature_id: str,
+    parameter_name: str,
+    new_value: Any,
+) -> dict[str, Any]:
+    with zipfile.ZipFile(package_path, "r") as zf:
+        names = set(zf.namelist())
+        if "graph/feature_graph.json" not in names:
+            raise ValueError("graph/feature_graph.json missing; cannot validate editable CAD parameter")
+        feature_graph = json.loads(zf.read("graph/feature_graph.json"))
+
+    feature = next((f for f in _feature_list_from_graph(feature_graph) if f.get("id") == feature_id), None)
+    if feature is None:
+        raise ValueError(f"feature_id not found in feature graph: {feature_id}")
+
+    params = feature.get("parameters", [])
+    if isinstance(params, dict):
+        params = [{"name": k, **(v if isinstance(v, dict) else {"current_value": v})} for k, v in params.items()]
+    if not isinstance(params, list):
+        raise ValueError(f"feature {feature_id} does not declare editable parameters")
+
+    param = next(
+        (
+            p for p in params
+            if isinstance(p, dict)
+            and (p.get("name") == parameter_name or p.get("freecad_parameter_name") == parameter_name)
+        ),
+        None,
+    )
+    if param is None:
+        raise ValueError(f"parameter {parameter_name!r} is not declared on feature {feature_id!r}")
+
+    editability = param.get("editability")
+    if editability is False or (isinstance(editability, dict) and editability.get("executable") is False):
+        raise ValueError(f"parameter {parameter_name!r} on feature {feature_id!r} is not editable")
+
+    if isinstance(new_value, (int, float)) and not isinstance(new_value, bool):
+        min_value = param.get("min_value")
+        max_value = param.get("max_value")
+        if min_value is not None and new_value < min_value:
+            raise ValueError(f"new_value {new_value!r} is below min_value {min_value!r}")
+        if max_value is not None and new_value > max_value:
+            raise ValueError(f"new_value {new_value!r} is above max_value {max_value!r}")
+
+    return {
+        "feature": feature,
+        "parameter": param,
+        "freecad_object_name": feature.get("freecad_object_name") or feature_id,
+        "freecad_parameter_name": param.get("freecad_parameter_name") or parameter_name,
+    }
+
+
+def _write_modified_step_into_package(
+    package_path: Path,
+    source_step: Path,
+    *,
+    feature_id: str,
+    parameter_name: str,
+) -> str:
+    if not source_step.exists():
+        raise FileNotFoundError(f"modified STEP artifact not found: {source_step}")
+    safe_feature = "".join(c if c.isalnum() or c in "._-" else "_" for c in feature_id)
+    safe_param = "".join(c if c.isalnum() or c in "._-" else "_" for c in parameter_name)
+    dest = f"geometry/modified_{safe_feature}_{safe_param}.step"
+
+    with zipfile.ZipFile(package_path, "r") as zf:
+        members = [(info, b"" if info.is_dir() else zf.read(info.filename)) for info in zf.infolist() if info.filename != dest]
+        manifest = json.loads(zf.read("manifest.json")) if "manifest.json" in zf.namelist() else {"resources": {}}
+
+    resources = manifest.setdefault("resources", {})
+    geometry = resources.setdefault("geometry", {})
+    if not isinstance(geometry, dict):
+        geometry = {}
+        resources["geometry"] = geometry
+    geometry["modified"] = dest
+
+    with tempfile.NamedTemporaryFile(delete=False, suffix=".aieng", dir=package_path.parent) as tmp:
+        tmp_path = Path(tmp.name)
+    try:
+        with zipfile.ZipFile(tmp_path, "w", compression=zipfile.ZIP_DEFLATED) as out_zf:
+            seen: set[str] = set()
+            for info, data in members:
+                if info.filename in seen or info.filename == "manifest.json":
+                    continue
+                seen.add(info.filename)
+                out_zf.writestr(info, data)
+            if "geometry/" not in seen:
+                out_zf.writestr("geometry/", b"")
+            out_zf.writestr("manifest.json", json.dumps(manifest, indent=2, sort_keys=True) + "\n")
+            out_zf.writestr(dest, source_step.read_bytes())
+        shutil.move(str(tmp_path), package_path)
+    finally:
+        if tmp_path.exists():
+            tmp_path.unlink()
+    return dest
 
 
 def convert_stl_to_glb(stl_path: Path, glb_path: Path) -> dict[str, Any]:
@@ -3078,6 +3201,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             inp.get("thresholdPercentile") or inp.get("threshold_percentile") or 90.0
         )
         overwrite: bool = bool(inp.get("overwrite", False))
+        refresh_field_summary: bool = bool(inp.get("refreshFieldSummary", inp.get("refresh_field_summary", True)))
 
         if not package_path_str and project_id:
             proj = get_project(active_settings, project_id)
@@ -3149,6 +3273,21 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                 "message": str(exc),
             }
 
+        refreshed_artifacts: list[dict[str, Any]] = []
+        warnings = list(result.get("warnings", []))
+        if refresh_field_summary:
+            try:
+                summary_result = aieng_bridge.write_field_summary(
+                    package_path_str,
+                    aieng_root=active_settings.aieng_root,
+                    overwrite=True,
+                )
+                refreshed_artifacts = summary_result.get("artifacts", [])
+            except Exception as exc:
+                warnings.append(
+                    f"Field regions were extracted, but field summary refresh failed: {type(exc).__name__}: {exc}"
+                )
+
         return {
             "ok": True,
             "tool": "cae.extract_field_regions",
@@ -3157,7 +3296,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "out_path": result.get("out_path"),
             "cluster_count": result.get("cluster_count", 0),
             "clusters": result.get("clusters", []),
-            "warnings": result.get("warnings", []),
+            "warnings": warnings,
             "artifacts": [
                 {
                     "path": result.get("out_path", ""),
@@ -3165,6 +3304,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
                     "role": "high_magnitude_spatial_clusters",
                 }
             ],
+            "refreshed_artifacts": refreshed_artifacts,
         }
 
     def _tool_cae_prepare_solver_run(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
@@ -4304,6 +4444,145 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
         return result
 
+    def _tool_cad_edit_parameter(inp: dict[str, Any], _ctx: dict[str, Any]) -> dict[str, Any]:
+        from . import freecad_bridge
+
+        package_path_str: str | None = inp.get("packagePath") or inp.get("package_path")
+        project_id: str | None = inp.get("project_id")
+        feature_id: str | None = inp.get("featureId") or inp.get("feature_id")
+        parameter_name: str | None = inp.get("parameterName") or inp.get("parameter_name")
+        new_value: Any = inp.get("newValue", inp.get("new_value"))
+        input_fcstd: str | None = inp.get("inputFcstd") or inp.get("input_fcstd")
+
+        if not package_path_str and project_id:
+            proj = get_project(active_settings, project_id)
+            pkg = resolve_project_path(active_settings, project_id, proj.get("aieng_file"))
+            if pkg is not None and pkg.exists():
+                package_path_str = str(pkg)
+
+        if not package_path_str:
+            return {
+                "ok": False,
+                "tool": "cad.edit_parameter",
+                "status": "error",
+                "code": "missing_package_path",
+                "message": "No package path provided and no project_id could be resolved.",
+            }
+        if not feature_id or not parameter_name:
+            return {
+                "ok": False,
+                "tool": "cad.edit_parameter",
+                "status": "error",
+                "code": "missing_parameter_edit_input",
+                "message": "feature_id, parameter_name, and new_value are required.",
+            }
+        if new_value is None:
+            return {
+                "ok": False,
+                "tool": "cad.edit_parameter",
+                "status": "error",
+                "code": "missing_new_value",
+                "message": "new_value is required.",
+            }
+
+        package_path = Path(package_path_str)
+        if not package_path.exists():
+            return {
+                "ok": False,
+                "tool": "cad.edit_parameter",
+                "status": "error",
+                "code": "file_not_found",
+                "message": f"Package not found: {package_path_str}",
+            }
+
+        try:
+            contract = _validate_cad_parameter_edit_contract(
+                package_path,
+                feature_id,
+                parameter_name,
+                new_value,
+            )
+        except (ValueError, KeyError, json.JSONDecodeError, zipfile.BadZipFile) as exc:
+            return {
+                "ok": False,
+                "tool": "cad.edit_parameter",
+                "status": "error",
+                "code": "preflight_failed",
+                "message": str(exc),
+            }
+
+        artifact_dir = package_path.parent / "cad_edit_artifacts"
+        artifact_dir.mkdir(parents=True, exist_ok=True)
+
+        try:
+            bridge_result = freecad_bridge.edit_parameter(
+                package_path,
+                feature_id=feature_id,
+                parameter_name=parameter_name,
+                new_value=new_value,
+                freecad_mcp_root=active_settings.freecad_mcp_root,
+                input_fcstd=input_fcstd,
+                artifact_output_dir=artifact_dir,
+            )
+        except Exception as exc:
+            return {
+                "ok": False,
+                "tool": "cad.edit_parameter",
+                "status": "error",
+                "code": "bridge_error",
+                "message": str(exc),
+            }
+
+        if bridge_result.get("status") not in {"success", "partial"}:
+            return {
+                "ok": False,
+                "tool": "cad.edit_parameter",
+                "status": "error",
+                "code": "edit_rejected_or_failed",
+                "message": "; ".join(bridge_result.get("errors") or []) or "CAD parameter edit did not succeed.",
+                "bridge_result": bridge_result,
+            }
+
+        geometry_artifacts: list[dict[str, str]] = []
+        package_geometry_path: str | None = None
+        for artifact in bridge_result.get("artifacts_written", []):
+            artifact_path = Path(str(artifact))
+            if artifact_path.suffix.lower() in {".step", ".stp"} and artifact_path.exists():
+                package_geometry_path = _write_modified_step_into_package(
+                    package_path,
+                    artifact_path,
+                    feature_id=feature_id,
+                    parameter_name=parameter_name,
+                )
+                geometry_artifacts.append({
+                    "path": package_geometry_path,
+                    "kind": "step",
+                    "role": "modified_geometry",
+                })
+                break
+
+        stale_artifacts = [
+            art for art in _GEOMETRY_STALE_ARTIFACTS
+            if art != package_geometry_path
+        ]
+
+        return {
+            "ok": True,
+            "tool": "cad.edit_parameter",
+            "status": "completed",
+            "package_path": str(package_path),
+            "feature_id": feature_id,
+            "parameter_name": parameter_name,
+            "new_value": new_value,
+            "freecad_object_name": contract["freecad_object_name"],
+            "freecad_parameter_name": contract["freecad_parameter_name"],
+            "package_geometry_path": package_geometry_path,
+            "stale_artifacts": stale_artifacts,
+            "warnings": bridge_result.get("warnings", []),
+            "bridge_result": bridge_result,
+            "artifacts": geometry_artifacts,
+        }
+
     _rt.register_tool(
         "aieng.inspect_package",
         _tool_inspect_package,
@@ -4481,6 +4760,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         _tool_freecad_run_macro,
         requires_approval=True,
         description="Run a FreeCAD macro (requires explicit approval; potentially destructive)",
+    )
+    _rt.register_tool(
+        "cad.edit_parameter",
+        _tool_cad_edit_parameter,
+        requires_approval=True,
+        description=(
+            "Approval-gated CAD parameter edit. Validates feature_id, parameter_name, "
+            "and declared bounds from graph/feature_graph.json before delegating to "
+            "the FreeCAD bridge; marks geometry-derived artifacts stale."
+        ),
     )
 
     def _registry_entry_requires_approval(entry: dict[str, Any]) -> bool:

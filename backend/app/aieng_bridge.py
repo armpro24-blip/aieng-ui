@@ -532,6 +532,50 @@ def extract_field_regions(
                 pass
 
 
+def write_field_summary(
+    package_path: str | Path,
+    *,
+    aieng_root: str | Path,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    """Write field summary artifacts derived from results/field_regions.json."""
+    pkg = Path(package_path)
+    if not pkg.exists():
+        raise FileNotFoundError(f"Package not found: {pkg}")
+
+    aieng_src = Path(aieng_root) / "src"
+    if not aieng_src.exists():
+        raise RuntimeError(f"aieng src not found at {aieng_src}")
+
+    injected = False
+    try:
+        candidate = str(aieng_src)
+        if candidate not in sys.path:
+            sys.path.insert(0, candidate)
+            injected = True
+        from aieng.cae_field_summary import write_field_summary_package  # type: ignore[import]
+
+        write_field_summary_package(pkg, overwrite=overwrite)
+        return {
+            "status": "ok",
+            "package_path": str(pkg),
+            "artifacts": [
+                {"path": "results/field_summary.json", "kind": "field_summary", "role": "llm_field_summary"},
+                {"path": "results/field_summary.md", "kind": "markdown", "role": "llm_field_summary"},
+            ],
+        }
+    except (FileNotFoundError, FileExistsError, ValueError):
+        raise
+    except Exception as exc:
+        raise RuntimeError(f"Failed to write field summary: {exc}") from exc
+    finally:
+        if injected:
+            try:
+                sys.path.remove(candidate)
+            except ValueError:
+                pass
+
+
 def generate_solver_input(
     package_path: str | Path,
     *,
