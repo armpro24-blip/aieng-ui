@@ -331,6 +331,112 @@ button:disabled {
   margin: 0;
 }
 
+.llm-priority-card {
+  border-color: rgba(45, 212, 191, 0.28);
+  background:
+    radial-gradient(circle at top right, rgba(20, 184, 166, 0.14), transparent 32%),
+    linear-gradient(180deg, rgba(15, 31, 43, 0.96), rgba(13, 22, 39, 0.96));
+}
+
+.llm-readiness-pill {
+  align-self: flex-start;
+  padding: 8px 12px;
+  border-radius: 999px;
+  border: 1px solid rgba(71, 85, 105, 0.4);
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+}
+
+.llm-readiness-pill.ready {
+  color: #ccfbf1;
+  border-color: rgba(45, 212, 191, 0.35);
+  background: rgba(13, 148, 136, 0.14);
+}
+
+.llm-readiness-pill.degraded {
+  color: #fde68a;
+  border-color: rgba(245, 158, 11, 0.35);
+  background: rgba(120, 53, 15, 0.18);
+}
+
+.llm-preset-row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.llm-preset {
+  border-radius: 999px;
+  padding: 8px 12px;
+  font-size: 12px;
+}
+
+.llm-preset.active {
+  border-color: rgba(45, 212, 191, 0.6);
+  background: rgba(15, 118, 110, 0.24);
+  color: #f0fdfa;
+}
+
+.llm-config-grid {
+  margin-bottom: 12px;
+}
+
+.llm-facts-grid,
+.llm-console-facts {
+  margin-top: 0;
+}
+
+.llm-summary-note {
+  margin-top: 2px;
+}
+
+.llm-primary-actions {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+}
+
+.llm-primary-actions button {
+  min-width: 0;
+}
+
+.llm-inline-note {
+  margin: 0;
+}
+
+.drawer-section {
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(71, 85, 105, 0.35);
+  background: rgba(3, 7, 18, 0.32);
+}
+
+.drawer-section + .drawer-section {
+  margin-top: 14px;
+}
+
+.drawer-section-heading {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  align-items: flex-start;
+  margin-bottom: 12px;
+}
+
+.drawer-section-heading h3 {
+  margin: 0 0 6px;
+  font-size: 15px;
+}
+
+.drawer-section-heading p {
+  margin: 0;
+  color: #91a3c2;
+  line-height: 1.45;
+  font-size: 12px;
+}
+
 .card {
   background:
     linear-gradient(180deg, rgba(17, 28, 52, 0.95), rgba(13, 22, 39, 0.96));
@@ -976,6 +1082,17 @@ input[type="file"] {
   padding-inline: 14px;
 }
 
+.legacy-chat-panel {
+  margin-top: 12px;
+}
+
+.legacy-chat-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 12px;
+}
+
 .chat-window {
   max-height: 360px;
   overflow: auto;
@@ -1507,7 +1624,8 @@ input[type="file"] {
     grid-template-columns: 1fr;
   }
 
-  .agent-chat-actions {
+  .agent-chat-actions,
+  .llm-primary-actions {
     grid-template-columns: 1fr;
   }
 }

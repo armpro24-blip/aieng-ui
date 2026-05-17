@@ -56,6 +56,8 @@ const BASE_STAGES: StageItem[] = [
 ];
 
 const CAD_PROVIDER_OPTIONS = [{ value: "freecad", label: "FreeCAD" }] as const;
+const LLM_CONFIG_STORAGE_KEY = "aieng-ui.llm-config";
+const LLM_PROVIDER_SUGGESTIONS = ["openai-compatible", "anthropic", "openai", "azure-openai"] as const;
 const CHAT_SUGGESTIONS = [
   "总结当前模型的语义状态和主要风险",
   "检查当前包是否已经具备执行 patch 的前提",
@@ -75,10 +77,10 @@ const DEFAULT_LLM_CONFIG: LLMConfig = {
 };
 
 const CONTROL_PANE_MODES: Array<{ id: ControlPaneMode; label: string; detail: string }> = [
+  { id: "chat", label: "LLM 主流程", detail: "Provider 配置与 Agent 编排" },
   { id: "project", label: "项目", detail: "导入与语义摘要" },
   { id: "agent", label: "Agent", detail: "能力与工作流" },
   { id: "cae", label: "CAE", detail: "证据与结果" },
-  { id: "chat", label: "对话", detail: "计划与审批" },
 ];
 
 function jsonBlock(value: unknown) {
@@ -107,6 +109,44 @@ function getManifestString(summary: ProjectSummary | null, key: string) {
 function getProviderLabel(provider?: string | null) {
   if (provider === "freecad") return "FreeCAD";
   return provider ?? "-";
+}
+
+function getLlmProviderLabel(provider?: string | null) {
+  if (provider === "openai-compatible") return "OpenAI-compatible";
+  if (provider === "azure-openai") return "Azure OpenAI";
+  if (provider === "openai") return "OpenAI";
+  if (provider === "anthropic") return "Anthropic";
+  return provider ?? "-";
+}
+
+function normalizeLlmConfig(raw: unknown): LLMConfig {
+  const base = { ...DEFAULT_LLM_CONFIG };
+  if (!raw || typeof raw !== "object") return base;
+  const data = raw as Record<string, unknown>;
+  return {
+    provider: typeof data.provider === "string" && data.provider.trim() ? data.provider : base.provider,
+    model: typeof data.model === "string" && data.model.trim() ? data.model : base.model,
+    base_url: typeof data.base_url === "string" ? data.base_url : base.base_url,
+    api_key_env: typeof data.api_key_env === "string" ? data.api_key_env : base.api_key_env,
+    temperature: typeof data.temperature === "number" && Number.isFinite(data.temperature) ? data.temperature : base.temperature,
+    top_p: typeof data.top_p === "number" && Number.isFinite(data.top_p) ? data.top_p : base.top_p,
+    max_output_tokens:
+      typeof data.max_output_tokens === "number" && Number.isFinite(data.max_output_tokens)
+        ? data.max_output_tokens
+        : base.max_output_tokens,
+    input_price_per_million_tokens:
+      typeof data.input_price_per_million_tokens === "number" && Number.isFinite(data.input_price_per_million_tokens)
+        ? data.input_price_per_million_tokens
+        : base.input_price_per_million_tokens,
+    output_price_per_million_tokens:
+      typeof data.output_price_per_million_tokens === "number" && Number.isFinite(data.output_price_per_million_tokens)
+        ? data.output_price_per_million_tokens
+        : base.output_price_per_million_tokens,
+  };
+}
+
+function isLlmConfigReady(config: LLMConfig) {
+  return Boolean(config.provider.trim() && config.model.trim() && (config.api_key_env?.trim() || config.base_url?.trim()));
 }
 
 function getRuntimeDetail(snapshot: RuntimeConfigSnapshot | null) {
@@ -514,6 +554,193 @@ function JsonDisclosure({ title, body, defaultOpen = false }: { title: string; b
   );
 }
 
+type LlmPriorityCardProps = {
+  llmConfig: LLMConfig;
+  llmReady: boolean;
+  selectedProjectName?: string | null;
+  agentBusy: boolean;
+  controlPaneMode: ControlPaneMode;
+  onOpenSettings(): void;
+  onFocusChat(): void;
+  onPlan(): void;
+  onRun(): void;
+};
+
+function LlmPriorityCard({
+  llmConfig,
+  llmReady,
+  selectedProjectName,
+  agentBusy,
+  controlPaneMode,
+  onOpenSettings,
+  onFocusChat,
+  onPlan,
+  onRun,
+}: LlmPriorityCardProps) {
+  return (
+    <section className="card llm-priority-card">
+      <div className="section-heading">
+        <div>
+          <h2>LLM 主流程</h2>
+          <p>自然语言编排优先显示，Provider 参数统一放进环境设置。项目、Agent、CAE 仍按原流程保留。</p>
+        </div>
+        <div className={`llm-readiness-pill ${llmReady ? "ready" : "degraded"}`}>
+          {llmReady ? "LLM ready" : "需要 Provider 配置"}
+        </div>
+      </div>
+
+      <div className="capability-facts llm-facts-grid">
+        <div><span>当前 Provider</span><strong>{getLlmProviderLabel(llmConfig.provider)}</strong></div>
+        <div><span>当前模型</span><strong>{llmConfig.model || "-"}</strong></div>
+        <div><span>当前项目</span><strong>{selectedProjectName ?? "未绑定项目"}</strong></div>
+        <div><span>入口状态</span><strong>{controlPaneMode === "chat" ? "LLM 主流程" : "辅助面板中"}</strong></div>
+      </div>
+
+      <div className="summary-note summary-muted llm-summary-note">
+        <strong>{llmReady ? "LLM planner 会优先接管" : "当前会退化到 heuristic planner"}</strong>
+        <p>
+          {llmReady
+            ? "Agent plan、workflow、benchmark 会复用环境设置里的 LLM Provider。"
+            : "没有完整 Provider 时，后端会保留启发式 planner 兜底。"}
+        </p>
+      </div>
+
+      <div className="action-row llm-primary-actions">
+        <button type="button" disabled={agentBusy} onClick={onPlan}>
+          生成 LLM 计划
+        </button>
+        <button type="button" className="ghost-button" disabled={agentBusy} onClick={onRun}>
+          执行 LLM 计划
+        </button>
+        <button type="button" className="ghost-button" onClick={onFocusChat}>
+          聚焦主流程
+        </button>
+        <button type="button" className="ghost-button" onClick={onOpenSettings}>
+          配置 Provider
+        </button>
+      </div>
+    </section>
+  );
+}
+
+type LlmProviderSettingsProps = {
+  llmConfig: LLMConfig;
+  llmReady: boolean;
+  onChange<K extends keyof LLMConfig>(key: K, value: LLMConfig[K]): void;
+  onPreset(provider: string): void;
+  onRestore(): void;
+};
+
+function LlmProviderSettings({
+  llmConfig,
+  llmReady,
+  onChange,
+  onPreset,
+  onRestore,
+}: LlmProviderSettingsProps) {
+  return (
+    <section className="drawer-section">
+      <div className="drawer-section-heading">
+        <div>
+          <h3>LLM Provider</h3>
+          <p>Agent plan、workflow 和 benchmark 共用这份模型配置。</p>
+        </div>
+        <div className={`llm-readiness-pill ${llmReady ? "ready" : "degraded"}`}>
+          {llmReady ? "已配置" : "待配置"}
+        </div>
+      </div>
+
+      <div className="llm-preset-row">
+        {LLM_PROVIDER_SUGGESTIONS.map((provider) => (
+          <button
+            key={provider}
+            type="button"
+            className={llmConfig.provider === provider ? "ghost-button llm-preset active" : "ghost-button llm-preset"}
+            onClick={() => onPreset(provider)}
+          >
+            {getLlmProviderLabel(provider)}
+          </button>
+        ))}
+      </div>
+
+      <div className="runtime-config-grid llm-config-grid">
+        <label className="form-field">
+          <span>Provider</span>
+          <input
+            list="llm-provider-options"
+            value={llmConfig.provider}
+            onChange={(event) => onChange("provider", event.target.value)}
+            placeholder="openai-compatible"
+          />
+          <datalist id="llm-provider-options">
+            {LLM_PROVIDER_SUGGESTIONS.map((provider) => (
+              <option key={provider} value={provider} />
+            ))}
+          </datalist>
+        </label>
+        <label className="form-field">
+          <span>Model</span>
+          <input value={llmConfig.model} onChange={(event) => onChange("model", event.target.value)} placeholder="configured-model" />
+        </label>
+        <label className="form-field">
+          <span>API key env</span>
+          <input
+            value={llmConfig.api_key_env ?? ""}
+            onChange={(event) => onChange("api_key_env", event.target.value)}
+            placeholder="OPENAI_API_KEY"
+          />
+        </label>
+        <label className="form-field">
+          <span>Base URL</span>
+          <input
+            value={llmConfig.base_url ?? ""}
+            onChange={(event) => onChange("base_url", event.target.value)}
+            placeholder="https://api.openai.com/v1"
+          />
+        </label>
+        <label className="form-field">
+          <span>Temperature</span>
+          <input
+            type="number"
+            min="0"
+            max="2"
+            step="0.1"
+            value={llmConfig.temperature}
+            onChange={(event) => onChange("temperature", Number(event.target.value) || 0)}
+          />
+        </label>
+        <label className="form-field">
+          <span>Top P</span>
+          <input
+            type="number"
+            min="0"
+            max="1"
+            step="0.05"
+            value={llmConfig.top_p}
+            onChange={(event) => onChange("top_p", Number(event.target.value) || 1)}
+          />
+        </label>
+        <label className="form-field runtime-config-span">
+          <span>Max output tokens</span>
+          <input
+            type="number"
+            min="256"
+            step="256"
+            value={llmConfig.max_output_tokens}
+            onChange={(event) => onChange("max_output_tokens", Number(event.target.value) || DEFAULT_LLM_CONFIG.max_output_tokens)}
+          />
+        </label>
+      </div>
+
+      <div className="action-row runtime-config-actions">
+        <button type="button" className="ghost-button" onClick={onRestore}>
+          恢复 LLM 默认
+        </button>
+      </div>
+    </section>
+  );
+}
+
 type RuntimeSettingsDrawerProps = {
   open: boolean;
   runtime: RuntimeConfigSnapshot | null;
@@ -522,8 +749,13 @@ type RuntimeSettingsDrawerProps = {
   runtimeNotice: Notice | null;
   runtimeProvider: string;
   runtimeReady: boolean;
+  llmConfig: LLMConfig;
+  llmReady: boolean;
   onClose(): void;
   onDraftChange<K extends keyof RuntimeConfig>(key: K, value: RuntimeConfig[K]): void;
+  onLlmChange<K extends keyof LLMConfig>(key: K, value: LLMConfig[K]): void;
+  onLlmPreset(provider: string): void;
+  onLlmRestore(): void;
   onTest(): void;
   onSave(): void;
   onRestore(): void;
@@ -537,8 +769,13 @@ function RuntimeSettingsDrawer({
   runtimeNotice,
   runtimeProvider,
   runtimeReady,
+  llmConfig,
+  llmReady,
   onClose,
   onDraftChange,
+  onLlmChange,
+  onLlmPreset,
+  onLlmRestore,
   onTest,
   onSave,
   onRestore,
@@ -551,13 +788,13 @@ function RuntimeSettingsDrawer({
         className="settings-drawer"
         role="dialog"
         aria-modal="true"
-        aria-label="CAD 配置"
+        aria-label="环境设置"
         onClick={(event) => event.stopPropagation()}
       >
         <div className="drawer-header">
           <div>
-            <h2>CAD 配置</h2>
-            <p>将环境配置收拢到二级设置里，主工作区只保留运行状态与导入主线。</p>
+            <h2>环境设置</h2>
+            <p>集中管理 LLM Provider 和 CAD Runtime。主工作区只显示当前状态与常用操作。</p>
           </div>
           <button type="button" className="ghost-button drawer-close" onClick={onClose}>
             关闭
@@ -565,92 +802,109 @@ function RuntimeSettingsDrawer({
         </div>
 
         <div className="drawer-body">
-          <div className="runtime-config-grid">
-            <label className="form-field">
-              <span>CAD Provider</span>
-              <select
-                value={runtimeDraft?.provider ?? "freecad"}
-                disabled={runtimeBusy}
-                onChange={(event) => onDraftChange("provider", event.target.value)}
-              >
-                {CAD_PROVIDER_OPTIONS.map((option) => (
-                  <option key={option.value} value={option.value}>
-                    {option.label}
-                  </option>
-                ))}
-              </select>
-            </label>
-            <label className="form-field">
-              <span>Topology Backend</span>
-              <select
-                value={runtimeDraft?.topology_backend ?? "auto"}
-                disabled={runtimeBusy}
-                onChange={(event) => onDraftChange("topology_backend", event.target.value)}
-              >
-                <option value="auto">auto</option>
-                <option value="mock">mock</option>
-                <option value="occ">occ</option>
-              </select>
-            </label>
-            <label className="form-field runtime-config-span">
-              <span>FreeCAD Home</span>
-              <input
-                value={runtimeDraft?.freecad_home ?? ""}
-                disabled={runtimeBusy}
-                onChange={(event) => onDraftChange("freecad_home", event.target.value)}
-                placeholder="FreeCAD 安装目录"
-              />
-            </label>
-            <label className="form-field runtime-config-span">
-              <span>FREECAD_MCP_ROOT</span>
-              <input
-                value={runtimeDraft?.freecad_mcp_root ?? ""}
-                disabled={runtimeBusy}
-                onChange={(event) => onDraftChange("freecad_mcp_root", event.target.value)}
-                placeholder="aieng-freecad-mcp 仓库目录"
-              />
-            </label>
-            <label className="form-field runtime-config-span">
-              <span>AIENG_ROOT</span>
-              <input
-                value={runtimeDraft?.aieng_root ?? ""}
-                disabled={runtimeBusy}
-                onChange={(event) => onDraftChange("aieng_root", event.target.value)}
-                placeholder="aieng 仓库目录"
-              />
-            </label>
-          </div>
+          <LlmProviderSettings
+            llmConfig={llmConfig}
+            llmReady={llmReady}
+            onChange={onLlmChange}
+            onPreset={onLlmPreset}
+            onRestore={onLlmRestore}
+          />
 
-          <div className="action-row runtime-config-actions">
-            <button disabled={!runtimeDraft || runtimeBusy} onClick={onTest}>
-              测试配置
-            </button>
-            <button disabled={!runtimeDraft || runtimeBusy} onClick={onSave}>
-              保存配置
-            </button>
-            <button disabled={!runtime?.defaults || runtimeBusy} onClick={onRestore}>
-              恢复默认
-            </button>
-          </div>
+          <section className="drawer-section">
+            <div className="drawer-section-heading">
+              <div>
+                <h3>CAD Runtime</h3>
+                <p>STEP 导入、预览、语义刷新和 FreeCAD MCP 能力使用这组配置。</p>
+              </div>
+            </div>
 
-          <div className="runtime-probe-grid">
-            <div>
-              <span>当前 Provider</span>
-              <strong>{runtimeProvider}</strong>
+            <div className="runtime-config-grid">
+              <label className="form-field">
+                <span>CAD Provider</span>
+                <select
+                  value={runtimeDraft?.provider ?? "freecad"}
+                  disabled={runtimeBusy}
+                  onChange={(event) => onDraftChange("provider", event.target.value)}
+                >
+                  {CAD_PROVIDER_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              <label className="form-field">
+                <span>Topology Backend</span>
+                <select
+                  value={runtimeDraft?.topology_backend ?? "auto"}
+                  disabled={runtimeBusy}
+                  onChange={(event) => onDraftChange("topology_backend", event.target.value)}
+                >
+                  <option value="auto">auto</option>
+                  <option value="mock">mock</option>
+                  <option value="occ">occ</option>
+                </select>
+              </label>
+              <label className="form-field runtime-config-span">
+                <span>FreeCAD Home</span>
+                <input
+                  value={runtimeDraft?.freecad_home ?? ""}
+                  disabled={runtimeBusy}
+                  onChange={(event) => onDraftChange("freecad_home", event.target.value)}
+                  placeholder="FreeCAD 安装目录"
+                />
+              </label>
+              <label className="form-field runtime-config-span">
+                <span>FREECAD_MCP_ROOT</span>
+                <input
+                  value={runtimeDraft?.freecad_mcp_root ?? ""}
+                  disabled={runtimeBusy}
+                  onChange={(event) => onDraftChange("freecad_mcp_root", event.target.value)}
+                  placeholder="aieng-freecad-mcp 仓库目录"
+                />
+              </label>
+              <label className="form-field runtime-config-span">
+                <span>AIENG_ROOT</span>
+                <input
+                  value={runtimeDraft?.aieng_root ?? ""}
+                  disabled={runtimeBusy}
+                  onChange={(event) => onDraftChange("aieng_root", event.target.value)}
+                  placeholder="aieng 仓库目录"
+                />
+              </label>
             </div>
-            <div>
-              <span>运行时状态</span>
-              <strong>{runtimeReady ? "已就绪" : "待配置"}</strong>
+
+            <div className="action-row runtime-config-actions">
+              <button disabled={!runtimeDraft || runtimeBusy} onClick={onTest}>
+                测试 CAD 配置
+              </button>
+              <button disabled={!runtimeDraft || runtimeBusy} onClick={onSave}>
+                保存 CAD 配置
+              </button>
+              <button disabled={!runtime?.defaults || runtimeBusy} onClick={onRestore}>
+                恢复 CAD 默认
+              </button>
             </div>
-            <div>
-              <span>拓扑后端</span>
-              <strong>{runtime?.probe.topology_backend_resolved ?? "-"}</strong>
+
+            <div className="runtime-probe-grid">
+              <div>
+                <span>当前 Provider</span>
+                <strong>{runtimeProvider}</strong>
+              </div>
+              <div>
+                <span>运行时状态</span>
+                <strong>{runtimeReady ? "已就绪" : "待配置"}</strong>
+              </div>
+              <div>
+                <span>拓扑后端</span>
+                <strong>{runtime?.probe.topology_backend_resolved ?? "-"}</strong>
+              </div>
+              <div>
+                <span>FreeCADCmd</span>
+                <strong>{runtime?.probe.freecad_cmd_exists ? "已找到" : "未找到"}</strong>
+              </div>
             </div>
-            <div>
-              <span>FreeCADCmd</span>
-              <strong>{runtime?.probe.freecad_cmd_exists ? "已找到" : "未找到"}</strong>
-            </div>
-          </div>
+          </section>
 
           {runtime?.probe.issues?.length ? (
             <div className="summary-note">
@@ -688,7 +942,7 @@ export default function App() {
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [summary, setSummary] = useState<ProjectSummary | null>(null);
   const [projectName, setProjectName] = useState("STEP 工作台项目");
-  const [message, setMessage] = useState("上传当前 STEP，导入 aieng，生成预览，并刷新语义信息");
+  const [message, setMessage] = useState("检查当前项目状态，并生成一份可审阅、可执行的 LLM Agent 计划。");
   const [chat, setChat] = useState<ChatResponse | null>(null);
   const [chatHistory, setChatHistory] = useState<ChatHistoryItem[]>([]);
   const [busy, setBusy] = useState(false);
@@ -719,7 +973,7 @@ export default function App() {
   const [benchmarkRun, setBenchmarkRun] = useState<BenchmarkRun | null>(null);
   const [benchmarkBusy, setBenchmarkBusy] = useState(false);
   const [llmConfig, setLlmConfig] = useState<LLMConfig>(DEFAULT_LLM_CONFIG);
-  const [controlPaneMode, setControlPaneMode] = useState<ControlPaneMode>("project");
+  const [controlPaneMode, setControlPaneMode] = useState<ControlPaneMode>("chat");
   const [agentPlan, setAgentPlan] = useState<AgentPlan | null>(null);
   const [agentBusy, setAgentBusy] = useState(false);
   const [artifactViewerPath, setArtifactViewerPath] = useState("");
@@ -762,6 +1016,25 @@ export default function App() {
   const effectiveViewerUrl = useMemo(() => withAssetVersion(rawViewerUrl, viewerVersion), [rawViewerUrl, viewerVersion]);
   const summaryViewerFormat = typeof summary?.viewer?.asset_format === "string" ? summary.viewer.asset_format : null;
   const effectiveViewerFormat = resolveAssetFormat(rawViewerUrl, summaryViewerFormat ?? selectedProject?.web_asset_format ?? null);
+  const llmReady = useMemo(() => isLlmConfigReady(llmConfig), [llmConfig]);
+
+  useEffect(() => {
+    try {
+      const raw = window.localStorage.getItem(LLM_CONFIG_STORAGE_KEY);
+      if (!raw) return;
+      setLlmConfig(normalizeLlmConfig(JSON.parse(raw)));
+    } catch {
+      // Ignore malformed local cache and keep defaults.
+    }
+  }, []);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem(LLM_CONFIG_STORAGE_KEY, JSON.stringify(llmConfig));
+    } catch {
+      // Ignore persistence failures in private mode / restricted environments.
+    }
+  }, [llmConfig]);
 
   function buildFallbackSummary(project: ProjectRecord, runtimeSnapshot: RuntimeConfigSnapshot | null = runtime): ProjectSummary {
     return {
@@ -1174,6 +1447,25 @@ export default function App() {
 
   function updateLlmConfig<K extends keyof LLMConfig>(key: K, value: LLMConfig[K]) {
     setLlmConfig((current) => ({ ...current, [key]: value }));
+  }
+
+  function applyLlmProviderPreset(provider: string) {
+    setLlmConfig((current) => {
+      const next = { ...current, provider };
+      if (provider === "anthropic") {
+        next.api_key_env = "ANTHROPIC_API_KEY";
+        next.base_url = "";
+      } else if (provider === "azure-openai") {
+        next.api_key_env = "AZURE_OPENAI_API_KEY";
+      } else {
+        next.api_key_env = "OPENAI_API_KEY";
+      }
+      return next;
+    });
+  }
+
+  function restoreDefaultLlmConfig() {
+    setLlmConfig({ ...DEFAULT_LLM_CONFIG });
   }
 
   async function runBenchmark(dryRun: boolean) {
@@ -1609,6 +1901,18 @@ export default function App() {
             ))}
           </div>
 
+          <LlmPriorityCard
+            llmConfig={llmConfig}
+            llmReady={llmReady}
+            selectedProjectName={selectedProject?.name ?? null}
+            agentBusy={agentBusy}
+            controlPaneMode={controlPaneMode}
+            onOpenSettings={() => setSettingsOpen(true)}
+            onFocusChat={() => setControlPaneMode("chat")}
+            onPlan={() => void planAgentChat()}
+            onRun={() => void runAgentChat()}
+          />
+
           {notice ? (
             <div className={`result-banner result-${notice.tone} control-status-banner`}>
               <strong>{notice.title}</strong>
@@ -1960,7 +2264,7 @@ export default function App() {
             <div className="section-heading">
               <div>
                 <h2>Benchmark Panel</h2>
-                <p>复用 aieng benchmark runner，支持 dry-run 估算和真实 LLM A/B 运行。</p>
+                <p>复用环境设置中的同一份 Provider 配置，支持 dry-run 估算和真实 LLM A/B 运行。</p>
               </div>
             </div>
 
@@ -1975,25 +2279,10 @@ export default function App() {
                   ))}
                 </select>
               </label>
-              <label className="form-field">
-                <span>Provider</span>
-                <select value={llmConfig.provider} onChange={(event) => updateLlmConfig("provider", event.target.value)}>
-                  <option value="openai-compatible">openai-compatible</option>
-                  <option value="anthropic">anthropic</option>
-                </select>
-              </label>
-              <label className="form-field">
-                <span>Model</span>
-                <input value={llmConfig.model} onChange={(event) => updateLlmConfig("model", event.target.value)} />
-              </label>
-              <label className="form-field">
-                <span>API key env</span>
-                <input value={llmConfig.api_key_env ?? ""} onChange={(event) => updateLlmConfig("api_key_env", event.target.value)} />
-              </label>
-              <label className="form-field runtime-config-span">
-                <span>Base URL</span>
-                <input value={llmConfig.base_url ?? ""} onChange={(event) => updateLlmConfig("base_url", event.target.value)} />
-              </label>
+              <div className="summary-note summary-muted llm-inline-note runtime-config-span">
+                <strong>{getLlmProviderLabel(llmConfig.provider)} / {llmConfig.model}</strong>
+                <p>{llmReady ? "Benchmark 会直接复用当前 LLM Provider 配置。" : "当前 Provider 配置不完整，benchmark 可能无法走真实 LLM 路径。"}</p>
+              </div>
             </div>
 
             <div className="action-row runtime-config-actions">
@@ -2500,26 +2789,34 @@ export default function App() {
           <section className="card">
             <div className="section-heading">
               <div>
-                <h2>Agent Chat</h2>
-                <p>自然语言先变成可审阅计划，再由后端白名单工具、MCP preflight 和审批闸门执行。</p>
+                <h2>LLM Agent Console</h2>
+                <p>先用 LLM 生成可审阅计划，再由白名单工具、MCP preflight 和审批闸门执行。这里现在是默认主入口。</p>
               </div>
             </div>
 
             <div className="agent-chat-strip">
               <div>
-                <strong>{agentPlan ? `当前计划：${agentPlan.steps.length} steps / ${agentPlan.mode}` : "对话建模入口"}</strong>
+                <strong>{agentPlan ? `当前计划：${agentPlan.steps.length} steps / ${agentPlan.mode}` : "LLM 驱动的建模入口"}</strong>
                 <span>
                   {agentPlan
                     ? agentPlan.preview.warnings[0] || (agentPlan.requires_approval ? "包含审批步骤" : "当前计划不需要审批")
-                    : "可以直接描述建模目标；没有 LLM key 时会使用本地启发式 planner。"}
+                    : llmReady
+                      ? "可以直接描述建模目标，系统会优先走 LLM planner。"
+                      : "Provider 未配完整时仍可运行，但会退化到本地启发式 planner。"}
                 </span>
+              </div>
+              <div className="capability-facts llm-console-facts">
+                <div><span>Provider</span><strong>{getLlmProviderLabel(llmConfig.provider)}</strong></div>
+                <div><span>Model</span><strong>{llmConfig.model}</strong></div>
+                <div><span>Project</span><strong>{selectedId ?? "-"}</strong></div>
+                <div><span>Route</span><strong>{llmReady ? "LLM-first" : "heuristic fallback"}</strong></div>
               </div>
               <div className="agent-chat-actions">
                 <button disabled={agentBusy} onClick={() => void planAgentChat()}>
-                  生成 Agent 计划
+                  生成 LLM 计划
                 </button>
                 <button className="ghost-button" disabled={agentBusy} onClick={() => void runAgentChat()}>
-                  执行 Agent 计划
+                  执行 LLM 计划
                 </button>
               </div>
             </div>
@@ -2656,17 +2953,20 @@ export default function App() {
             </div>
 
             <textarea rows={4} value={message} onChange={(event) => setMessage(event.target.value)} placeholder="例如：总结当前模型并给出下一步可执行的安全操作。" />
-            <div className="action-row">
-              <button disabled={!selectedId || busy} className="ghost-button" onClick={() => void submitChat("plan")}>
-                旧版规则计划
-              </button>
-              <button disabled={!selectedId || busy} className="ghost-button" onClick={() => void submitChat("execute")}>
-                旧版安全执行
-              </button>
-              <button disabled={busy} className="ghost-button" onClick={() => void submitRuntime()}>
-                直接 runtime
-              </button>
-            </div>
+            <details className="fold-block legacy-chat-panel">
+              <summary className="fold-summary">兼容 / 调试路径</summary>
+              <div className="legacy-chat-actions">
+                <button disabled={!selectedId || busy} className="ghost-button" onClick={() => void submitChat("plan")}>
+                  旧版规则计划
+                </button>
+                <button disabled={!selectedId || busy} className="ghost-button" onClick={() => void submitChat("execute")}>
+                  旧版安全执行
+                </button>
+                <button disabled={busy} className="ghost-button" onClick={() => void submitRuntime()}>
+                  直接 runtime
+                </button>
+              </div>
+            </details>
 
             {lastRuntimeRun?.status === "awaiting_approval" ? (
               <div className="action-row approval-action-row">
@@ -2705,8 +3005,13 @@ export default function App() {
         runtimeNotice={runtimeNotice}
         runtimeProvider={runtimeProvider}
         runtimeReady={runtimeReady}
+        llmConfig={llmConfig}
+        llmReady={llmReady}
         onClose={() => setSettingsOpen(false)}
         onDraftChange={updateRuntimeDraft}
+        onLlmChange={updateLlmConfig}
+        onLlmPreset={applyLlmProviderPreset}
+        onLlmRestore={restoreDefaultLlmConfig}
         onTest={() => void runRuntimeTask("test", () => api.testRuntimeConfig(runtimeDraft!))}
         onSave={() => void runRuntimeTask("save", () => api.updateRuntimeConfig(runtimeDraft!))}
         onRestore={restoreRuntimeDefaults}
