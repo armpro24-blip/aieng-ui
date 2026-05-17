@@ -471,6 +471,39 @@ def test_package_summary_solver_fields_reflect_frd_presence(monkeypatch, tmp_pat
     assert stress_field["max_value"] == 200.0
 
 
+def test_package_summary_discovers_frd_fields_without_cae_setup(monkeypatch, tmp_path: Path) -> None:
+    """A package with solver output but no setup constraints still exposes renderable fields."""
+    settings = _make_patch_settings(tmp_path)
+    monkeypatch.setattr("app.main.resolve_provider_bundle", lambda *a, **k: None)
+    monkeypatch.setattr("app.main.runtime_status", lambda s: {"provider": "freecad", "ready": False})
+
+    project = save_project(settings, default_project("frd-only"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "packages" / "frd-only.aieng"
+    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+
+    coords = {1: (0.0, 0.0, 0.0), 2: (1.0, 0.0, 0.0)}
+    stress = {1: [25.0, 0.0, 0.0, 0.0, 0.0, 0.0], 2: [75.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+    frd_text = _make_test_frd_with_coords(coords, stress_nodes=stress)
+
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "frd-only", "resources": {}}))
+        zf.writestr("simulation/runs/run_001/outputs/result.frd", frd_text)
+
+    project["aieng_file"] = "packages/frd-only.aieng"
+    save_project(settings, project)
+
+    summary = package_summary(settings, project_id)
+
+    assert summary["cae"]["present"] is True
+    assert summary["cae"]["results_available"] is True
+    assert "stress" in summary["cae"]["available_fields"]
+    stress_field = next(sf for sf in summary["cae"]["solver_fields"] if sf["field_name"] == "stress")
+    assert stress_field["format"] == "vertex_json"
+    assert stress_field["min_value"] == 25.0
+    assert stress_field["max_value"] == 75.0
+
+
 def test_cae_artifacts_endpoint_returns_detection_result(monkeypatch, tmp_path: Path) -> None:
     settings = Settings(
         platform_root=tmp_path / "platform",
@@ -898,8 +931,11 @@ def test_runtime_tools_endpoint_returns_registry(tmp_path: Path) -> None:
     names = [t["name"] for t in tools]
     assert "aieng.inspect_package" in names
     assert "freecad.run_macro" in names
+    assert "cad.edit_parameter" in names
     macro = next(t for t in tools if t["name"] == "freecad.run_macro")
     assert macro["requires_approval"] is True
+    cad_edit = next(t for t in tools if t["name"] == "cad.edit_parameter")
+    assert cad_edit["requires_approval"] is True
     assert isinstance(macro["description"], str) and len(macro["description"]) > 0
     for tool in tools:
         assert "name" in tool
@@ -2935,10 +2971,13 @@ def test_cae_extract_field_regions_success(tmp_path: Path) -> None:
     # The high-stress group near x=10 should form at least one cluster
     assert any(c["node_count"] >= 3 for c in clusters)
     assert any("field_regions" in a["path"] for a in result["artifacts"])
+    assert any(a["path"] == "results/field_summary.json" for a in result["refreshed_artifacts"])
 
     # Verify package was updated
     with zipfile.ZipFile(pkg_path, "r") as zf:
         assert "results/field_regions.json" in zf.namelist()
+        assert "results/field_summary.json" in zf.namelist()
+        assert "results/field_summary.md" in zf.namelist()
         written = json.loads(zf.read("results/field_regions.json"))
     assert written["format_version"] is not None
     assert written["cluster_count"] >= 1
@@ -3000,6 +3039,170 @@ def test_cae_extract_field_regions_missing_frd_path_returns_error(tmp_path: Path
     result = resp.json()["tool_results"][0]["output"]
     assert result["status"] == "error"
     assert result["code"] == "missing_frd_path"
+
+
+# ---------------------------------------------------------------------------
+# Phase 32 — cad.edit_parameter runtime tool
+# ---------------------------------------------------------------------------
+
+def _make_cad_parameter_package(pkg_path: Path) -> None:
+    """Create a minimal .aieng package with one declared editable CAD parameter."""
+    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+    feature_graph = {
+        "features": [
+            {
+                "id": "feat_base_001",
+                "type": "base_plate",
+                "name": "Base plate",
+                "freecad_object_name": "BasePlate",
+                "parameters": [
+                    {
+                        "name": "thickness_mm",
+                        "current_value": 10.0,
+                        "min_value": 5.0,
+                        "max_value": 20.0,
+                        "editability": {"executable": True},
+                        "freecad_parameter_name": "Thickness",
+                    }
+                ],
+            }
+        ]
+    }
+    manifest = {
+        "model_id": "cad-edit-test",
+        "resources": {
+            "geometry": {"source": "geometry/source.step"},
+            "graph": {"feature_graph": "graph/feature_graph.json"},
+        },
+    }
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps(manifest))
+        zf.writestr("geometry/source.step", "ISO-10303-21;\nEND-ISO-10303-21;\n")
+        zf.writestr("graph/feature_graph.json", json.dumps(feature_graph))
+
+
+def test_cad_edit_parameter_requires_approval(tmp_path: Path) -> None:
+    """cad.edit_parameter is approval-gated and does not execute on initial run."""
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("cad-edit-approval"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "cad-edit.aieng"
+    _make_cad_parameter_package(pkg_path)
+    project["aieng_file"] = "cad-edit.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "edit cad parameter",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "feature_id": "feat_base_001",
+            "parameter_name": "thickness_mm",
+            "new_value": 8.0,
+        },
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "awaiting_approval"
+    assert run["tool_results"][0]["status"] == "needs_approval"
+    approval = next(e for e in run["events"] if e["type"] == "approval_required")
+    assert approval["payload"]["tool"] == "cad.edit_parameter"
+
+
+def test_cad_edit_parameter_success_writes_step_and_marks_stale(monkeypatch, tmp_path: Path) -> None:
+    """Approved cad.edit_parameter writes modified STEP back into the package."""
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("cad-edit-success"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "cad-edit.aieng"
+    _make_cad_parameter_package(pkg_path)
+    project["aieng_file"] = "cad-edit.aieng"
+    save_project(settings, project)
+
+    modified_step = tmp_path / "modified.step"
+    modified_step.write_text("ISO-10303-21;\n/* modified */\nEND-ISO-10303-21;\n", encoding="utf-8")
+
+    def fake_edit_parameter(*args: Any, **kwargs: Any) -> dict[str, Any]:
+        return {
+            "status": "success",
+            "summary": "mock edit",
+            "artifacts_written": [str(modified_step)],
+            "warnings": [],
+            "errors": [],
+        }
+
+    monkeypatch.setattr("app.freecad_bridge.edit_parameter", fake_edit_parameter)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "edit cad parameter",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "feature_id": "feat_base_001",
+            "parameter_name": "thickness_mm",
+            "new_value": 8.0,
+        },
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "awaiting_approval"
+
+    approve_resp = client.post(f"/api/runtime/runs/{run['run_id']}/approve")
+    assert approve_resp.status_code == 200
+    approved = approve_resp.json()
+    assert approved["status"] == "completed"
+    result = approved["tool_results"][0]["output"]
+    assert result["status"] == "completed"
+    assert result["package_geometry_path"] == "geometry/modified_feat_base_001_thickness_mm.step"
+    assert "results/computed_metrics.json" in result["stale_artifacts"]
+    assert "results/field_regions.json" in result["stale_artifacts"]
+
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        names = zf.namelist()
+        assert "geometry/modified_feat_base_001_thickness_mm.step" in names
+        manifest = json.loads(zf.read("manifest.json"))
+    assert manifest["resources"]["geometry"]["modified"] == "geometry/modified_feat_base_001_thickness_mm.step"
+
+
+def test_cad_edit_parameter_rejects_out_of_bounds_after_approval(tmp_path: Path) -> None:
+    """cad.edit_parameter preflight refuses values outside declared bounds."""
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("cad-edit-bounds"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "cad-edit.aieng"
+    _make_cad_parameter_package(pkg_path)
+    project["aieng_file"] = "cad-edit.aieng"
+    save_project(settings, project)
+
+    resp = client.post("/api/runtime/runs", json={
+        "message": "edit cad parameter",
+        "project_id": project_id,
+        "tool_input": {
+            "project_id": project_id,
+            "feature_id": "feat_base_001",
+            "parameter_name": "thickness_mm",
+            "new_value": 2.0,
+        },
+    })
+    assert resp.status_code == 200
+    run = resp.json()
+    assert run["status"] == "awaiting_approval"
+
+    approve_resp = client.post(f"/api/runtime/runs/{run['run_id']}/approve")
+    assert approve_resp.status_code == 200
+    result = approve_resp.json()["tool_results"][0]["output"]
+    assert result["status"] == "error"
+    assert result["code"] == "preflight_failed"
+    assert "below min_value" in result["message"]
 
 
 # ---------------------------------------------------------------------------
