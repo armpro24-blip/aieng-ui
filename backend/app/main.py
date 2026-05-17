@@ -1753,16 +1753,35 @@ def package_summary(settings: Settings, project_id: str) -> dict[str, Any]:
             "stress": {"min_value": 0.0, "max_value": 250.0, "unit": "MPa"},
             "displacement": {"min_value": 0.0, "max_value": 5.0, "unit": "mm"},
         }
-        _cae["solver_fields"] = [
-            {
+        # Check whether a real FRD exists so solver_fields can advertise the
+        # correct format upfront.
+        _has_frd = False
+        if package_path and package_path.exists():
+            _has_frd = _resolve_frd_in_package(package_path) is not None
+
+        _solver_fields: list[dict[str, Any]] = []
+        for f in (_cae.get("available_fields") or []):
+            _meta = _field_defaults.get(f, {"min_value": 0.0, "max_value": 1.0, "unit": ""})
+            _field_entry: dict[str, Any] = {
                 "field_name": f,
                 "descriptor_url": f"/api/projects/{project_id}/fields/{f}",
-                **_field_defaults.get(f, {"min_value": 0.0, "max_value": 1.0, "unit": ""}),
-                "format": "vertex_synthetic",
+                **_meta,
+                "format": "vertex_json" if _has_frd else "vertex_synthetic",
                 "available": True,
             }
-            for f in (_cae.get("available_fields") or [])
-        ]
+            # If FRD is present, try to fetch real extrema so the frontend
+            # legend is accurate before the first descriptor fetch.
+            if _has_frd:
+                try:
+                    _real = _extract_frd_field_data(package_path, f, settings.aieng_root)
+                    if _real is not None:
+                        _field_entry["min_value"] = _real["min_value"]
+                        _field_entry["max_value"] = _real["max_value"]
+                        _field_entry["unit"] = _real["unit"]
+                except Exception:
+                    pass
+            _solver_fields.append(_field_entry)
+        _cae["solver_fields"] = _solver_fields
         if package_path and package_path.exists():
             _artifact_detection = _detect_cae_artifacts(settings, package_path)
             if _artifact_detection is not None:
@@ -1890,6 +1909,160 @@ def chat_orchestrator(settings: Settings, project_id: str, payload: dict[str, An
         "audit_log_url": audit_meta["audit_url"],
         "patch_json": patch_json,
     }
+
+
+def _resolve_frd_in_package(package_path: Path) -> str | None:
+    """Find the newest result.frd inside a .aieng package."""
+    if not package_path.exists():
+        return None
+    try:
+        with zipfile.ZipFile(package_path, "r") as zf:
+            candidates = [
+                name for name in zf.namelist()
+                if name.endswith("/outputs/result.frd")
+            ]
+            if not candidates:
+                return None
+            # Pick the lexicographically last run (run_002 > run_001)
+            return sorted(candidates)[-1]
+    except zipfile.BadZipFile:
+        return None
+
+
+def _extract_frd_field_data(
+    package_path: Path,
+    field_name: str,
+    aieng_root: Path,
+) -> dict[str, Any] | None:
+    """Extract per-node scalar values and coordinates from an FRD inside a package.
+
+    Returns a dict with ``values``, ``node_coords``, ``min_value``,
+    ``max_value``, ``unit``, ``warnings`` — or ``None`` if no usable FRD.
+    """
+    frd_entry = _resolve_frd_in_package(package_path)
+    if frd_entry is None:
+        return None
+
+    # Extract FRD to temp file for parsing
+    try:
+        with zipfile.ZipFile(package_path, "r") as zf:
+            frd_bytes = zf.read(str(frd_entry))
+    except (KeyError, zipfile.BadZipFile):
+        return None
+
+    with tempfile.NamedTemporaryFile(mode="wb", suffix=".frd", delete=False) as fh:
+        fh.write(frd_bytes)
+        temp_frd = Path(fh.name)
+
+    try:
+        aieng_src = aieng_root / "src"
+        injected = False
+        if str(aieng_src) not in sys.path:
+            sys.path.insert(0, str(aieng_src))
+            injected = True
+
+        from aieng.simulation.frd_result_extractor import parse_frd
+        from aieng.simulation.field_region_extractor import _extract_node_coords_from_frd
+
+        fields = parse_frd(temp_frd)
+        coords = _extract_node_coords_from_frd(temp_frd)
+        if not coords:
+            return None
+
+        import math
+
+        warnings: list[str] = []
+        values: dict[int, float] = {}
+        unit = ""
+
+        if field_name == "stress":
+            s_field = fields.get("S")
+            if not s_field:
+                warnings.append("S (stress tensor) field not found in FRD.")
+                return None
+            node_data = s_field["node_data"]
+            for nid, vals in node_data.items():
+                if nid not in coords:
+                    continue
+                if len(vals) < 6 or any(v is None for v in vals[:6]):
+                    continue
+                sxx, syy, szz = float(vals[0]), float(vals[1]), float(vals[2])
+                sxy, sxz, syz = float(vals[3]), float(vals[4]), float(vals[5])
+                vm = math.sqrt(
+                    0.5 * (
+                        (sxx - syy) ** 2
+                        + (syy - szz) ** 2
+                        + (szz - sxx) ** 2
+                        + 6.0 * (sxy ** 2 + sxz ** 2 + syz ** 2)
+                    )
+                )
+                values[nid] = vm
+            unit = "MPa"
+
+        elif field_name == "displacement":
+            disp = fields.get("DISP")
+            if not disp:
+                warnings.append("DISP field not found in FRD.")
+                return None
+            components = disp["components"]
+            node_data = disp["node_data"]
+            all_idx = next((i for i, c in enumerate(components) if c == "ALL"), None)
+            d1_idx = next((i for i, c in enumerate(components) if c == "D1"), None)
+            d2_idx = next((i for i, c in enumerate(components) if c == "D2"), None)
+            d3_idx = next((i for i, c in enumerate(components) if c == "D3"), None)
+            for nid, vals in node_data.items():
+                if nid not in coords:
+                    continue
+                if all_idx is not None and all_idx < len(vals) and vals[all_idx] is not None:
+                    v = abs(float(vals[all_idx]))
+                elif (
+                    d1_idx is not None and d2_idx is not None and d3_idx is not None
+                    and all(idx < len(vals) and vals[idx] is not None for idx in (d1_idx, d2_idx, d3_idx))
+                ):
+                    v = math.sqrt(
+                        float(vals[d1_idx]) ** 2
+                        + float(vals[d2_idx]) ** 2
+                        + float(vals[d3_idx]) ** 2
+                    )
+                else:
+                    continue
+                values[nid] = v
+            unit = "mm"
+        else:
+            warnings.append(f"Field '{field_name}' is not supported for FRD extraction.")
+            return None
+
+        if not values:
+            warnings.append(f"No valid '{field_name}' values could be extracted from FRD.")
+            return None
+
+        # Sort by node_id for stable ordering
+        sorted_ids = sorted(values.keys())
+        value_list = [values[nid] for nid in sorted_ids]
+        coord_list = [list(coords[nid]) for nid in sorted_ids]
+        min_val = min(value_list)
+        max_val = max(value_list)
+
+        return {
+            "values": value_list,
+            "node_coords": coord_list,
+            "min_value": min_val,
+            "max_value": max_val,
+            "unit": unit,
+            "warnings": warnings,
+        }
+    except Exception:
+        return None
+    finally:
+        try:
+            temp_frd.unlink(missing_ok=True)
+        except OSError:
+            pass
+        if injected:
+            try:
+                sys.path.remove(str(aieng_src))
+            except ValueError:
+                pass
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -2336,12 +2509,39 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/projects/{project_id}/fields/{field_name}")
     def get_field_descriptor(project_id: str, field_name: str) -> dict[str, Any]:
-        get_project(active_settings, project_id)
+        project = get_project(active_settings, project_id)
         _known: dict[str, dict[str, Any]] = {
             "stress": {"min_value": 0.0, "max_value": 250.0, "unit": "MPa", "colormap": "thermal"},
             "displacement": {"min_value": 0.0, "max_value": 5.0, "unit": "mm", "colormap": "coolwarm"},
         }
         meta = _known.get(field_name, {"min_value": 0.0, "max_value": 1.0, "unit": "", "colormap": "thermal"})
+
+        # Attempt real FRD extraction
+        pkg = resolve_project_path(active_settings, project_id, project.get("aieng_file"))
+        frd_data: dict[str, Any] | None = None
+        if pkg is not None and pkg.exists():
+            try:
+                frd_data = _extract_frd_field_data(pkg, field_name, active_settings.aieng_root)
+            except Exception:
+                frd_data = None
+
+        if frd_data is not None:
+            return {
+                "field_name": field_name,
+                "project_id": project_id,
+                "format": "vertex_json",
+                "basis": "frd_nearest_node",
+                "min_value": frd_data["min_value"],
+                "max_value": frd_data["max_value"],
+                "unit": frd_data["unit"],
+                "colormap": meta["colormap"],
+                "source": "frd",
+                "values": frd_data["values"],
+                "node_coords": frd_data["node_coords"],
+                "warnings": frd_data["warnings"],
+            }
+
+        # Fallback to synthetic
         return {
             "field_name": field_name,
             "project_id": project_id,

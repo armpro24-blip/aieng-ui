@@ -346,6 +346,127 @@ def test_field_descriptor_endpoint_returns_synthetic_contract(tmp_path: Path) ->
     assert missing.status_code == 404
 
 
+def test_field_descriptor_returns_real_frd_data(tmp_path: Path) -> None:
+    """GET /fields/{name} returns real FRD data when result.frd exists in package."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("frd-field"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "field-test.aieng"
+    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Build an FRD with coordinates + stress field
+    coords = {
+        1: (0.0, 0.0, 0.0),
+        2: (10.0, 0.0, 0.0),
+        3: (10.0, 1.0, 0.0),
+        4: (0.0, 1.0, 0.0),
+        5: (0.0, 0.0, 1.0),
+        6: (10.0, 0.0, 1.0),
+        7: (10.0, 1.0, 1.0),
+        8: (0.0, 1.0, 1.0),
+    }
+    stress = {
+        1: [10.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        2: [20.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        3: [30.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        4: [40.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        5: [50.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        6: [200.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        7: [210.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+        8: [220.0, 0.0, 0.0, 0.0, 0.0, 0.0],
+    }
+    frd_text = _make_test_frd_with_coords(coords, stress_nodes=stress)
+
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "field-test", "resources": {}}))
+        zf.writestr("simulation/runs/run_001/outputs/result.frd", frd_text)
+
+    project["aieng_file"] = "field-test.aieng"
+    save_project(settings, project)
+
+    resp = client.get(f"/api/projects/{project_id}/fields/stress")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["format"] == "vertex_json"
+    assert data["basis"] == "frd_nearest_node"
+    assert data["source"] == "frd"
+    assert data["unit"] == "MPa"
+    assert isinstance(data["values"], list)
+    assert len(data["values"]) == 8
+    assert isinstance(data["node_coords"], list)
+    assert len(data["node_coords"]) == 8
+    assert data["min_value"] == 10.0
+    assert data["max_value"] == 220.0
+
+
+def test_field_descriptor_fallback_to_synthetic_when_no_frd(tmp_path: Path) -> None:
+    """GET /fields/{name} falls back to synthetic when package has no FRD."""
+    from app.main import create_app, default_project, project_dir, save_project
+    from starlette.testclient import TestClient
+
+    settings = _make_patch_settings(tmp_path)
+    app = create_app(settings)
+    client = TestClient(app)
+
+    project = save_project(settings, default_project("no-frd"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "no-frd.aieng"
+    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "no-frd", "resources": {}}))
+
+    project["aieng_file"] = "no-frd.aieng"
+    save_project(settings, project)
+
+    resp = client.get(f"/api/projects/{project_id}/fields/stress")
+    assert resp.status_code == 200
+    data = resp.json()
+    assert data["format"] == "vertex_synthetic"
+    assert data["basis"] == "y_normalized"
+    assert data["source"] == "synthetic_mock"
+
+
+def test_package_summary_solver_fields_reflect_frd_presence(monkeypatch, tmp_path: Path) -> None:
+    """package_summary advertises vertex_json solver_fields when FRD is present."""
+    settings = _make_patch_settings(tmp_path)
+    monkeypatch.setattr("app.main.resolve_provider_bundle", lambda *a, **k: None)
+    monkeypatch.setattr("app.main.runtime_status", lambda s: {"provider": "freecad", "ready": False})
+
+    project = default_project("frd-summary")
+    project["cae_context"] = {
+        "constraints": [{"metric": "max_von_mises_stress_mpa", "type": "stress_limit"}],
+    }
+    project = save_project(settings, project)
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "packages" / "cae-demo.aieng"
+    pkg_path.parent.mkdir(parents=True, exist_ok=True)
+
+    coords = {1: (0.0, 0.0, 0.0), 2: (1.0, 0.0, 0.0)}
+    stress = {1: [100.0, 0.0, 0.0, 0.0, 0.0, 0.0], 2: [200.0, 0.0, 0.0, 0.0, 0.0, 0.0]}
+    frd_text = _make_test_frd_with_coords(coords, stress_nodes=stress)
+
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "demo", "resources": {}}))
+        zf.writestr("graph/constraints.json", json.dumps({"constraints": [{"metric": "max_von_mises_stress_mpa", "type": "stress_limit"}]}))
+        zf.writestr("simulation/runs/run_001/outputs/result.frd", frd_text)
+
+    project["aieng_file"] = "packages/cae-demo.aieng"
+    save_project(settings, project)
+
+    summary = package_summary(settings, project_id)
+    assert "stress" in summary["cae"]["available_fields"]
+    stress_field = next(sf for sf in summary["cae"]["solver_fields"] if sf["field_name"] == "stress")
+    assert stress_field["format"] == "vertex_json"
+    assert stress_field["min_value"] == 100.0
+    assert stress_field["max_value"] == 200.0
+
+
 def test_cae_artifacts_endpoint_returns_detection_result(monkeypatch, tmp_path: Path) -> None:
     settings = Settings(
         platform_root=tmp_path / "platform",

@@ -316,6 +316,9 @@ export type SolverFieldDescriptor = {
   unit?: string | null;
   colormap?: string | null;
   source?: string | null;
+  values?: number[] | null;
+  node_coords?: [number, number, number][] | null;
+  warnings?: string[] | null;
 };
 
 export type RuntimeEventType =
