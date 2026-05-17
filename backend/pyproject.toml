@@ -1,8 +1,50 @@
 [project]
 name = "aieng-platform-backend"
 version = "0.1.0"
-description = "FastAPI backend for the aieng web platform"
+description = "FastAPI backend + React workbench for the aieng engineering platform — local orchestration runtime, approval-gated CalculiX adapter, artifact write-back, and MCP-compatible tool surface for LLM agents."
+readme = "../README.md"
+license = {text = "MIT"}
 requires-python = ">=3.11"
+authors = [
+    {name = "Libin Mao", email = "id256211@ostfalia.de"},
+    {name = "Yinan Wang", email = "fhwangyinan@sina.com"},
+]
+keywords = [
+    "cad",
+    "cae",
+    "fea",
+    "fastapi",
+    "react",
+    "workbench",
+    "engineering",
+    "ai",
+    "llm",
+    "agent",
+    "mcp",
+    "calculix",
+    "freecad",
+    "approval-gate",
+    "runtime",
+    "evidence",
+    "audit",
+    "three-js",
+    "design-automation",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Framework :: FastAPI",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Scientific/Engineering :: Visualization",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Typing :: Typed",
+]
 dependencies = [
   "fastapi>=0.110",
   "uvicorn[standard]>=0.27",
@@ -17,6 +59,14 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "httpx>=0.27"]
+
+[project.urls]
+Homepage = "https://github.com/armpro24-blip/aieng-ui"
+Repository = "https://github.com/armpro24-blip/aieng-ui"
+Issues = "https://github.com/armpro24-blip/aieng-ui/issues"
+Documentation = "https://github.com/armpro24-blip/aieng-ui#readme"
+"Sister project (aieng)" = "https://github.com/armpro24-blip/aieng"
+"Sister project (MCP bridge)" = "https://github.com/armpro24-blip/aieng-freecad-mcp"
 
 [build-system]
 requires = ["setuptools>=68"]
