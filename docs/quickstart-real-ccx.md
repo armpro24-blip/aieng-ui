@@ -197,6 +197,30 @@ real binaries.
 
 ---
 
+## Evidence artifacts vs. engineering claims
+
+Running the solver and refreshing the summary **creates or updates evidence
+artifacts** inside the `.aieng` package:
+
+| Artifact | Written by | Evidence role |
+|----------|-----------|---------------|
+| `simulation/runs/<id>/solver_run.json` | `cae.run_solver` | solver execution metadata, audit |
+| `simulation/runs/<id>/outputs/result.frd` | `cae.run_solver` | raw numerical result source |
+| `results/computed_metrics.json` | `cae.run_solver` (with `extract_results=True`) | FRD-extracted scalar extrema |
+| `results/result_summary.json` | `postprocess.refresh_cae_summary` | LLM-readable summary |
+| `results/evidence_index.json` | `postprocess.refresh_cae_summary` | auditable artifact catalog |
+
+**Neither step validates or advances engineering claims automatically.**
+`ai/claim_map.json` and `results/claim_map.json` are not written by
+`cae.run_solver` or `postprocess.refresh_cae_summary`. Claim advancement
+is an explicit, separate workflow that requires a deliberate
+claim-update step.
+
+This boundary is verified by `test_evidence_claim_contract_after_cae_run`
+in `aieng-ui/backend/tests/test_api.py`.
+
+---
+
 ## Honest limitations
 
 | Limitation | Why |

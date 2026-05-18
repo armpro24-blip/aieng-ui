@@ -1646,6 +1646,147 @@ def test_postprocessing_smoke_metrics_import_and_summary_refresh(tmp_path: Path)
     assert summary["computed_values"]["minimum_safety_factor"]["value"] == 1.33
 
 
+def test_evidence_claim_contract_after_cae_run(tmp_path: Path) -> None:
+    """Evidence/claim contract: refresh_cae_summary records solver artifacts as evidence.
+
+    Pre-injects a package that looks like a completed solver run (solver_run.json,
+    result.frd, computed_metrics.json) then calls postprocess.refresh_cae_summary
+    and reads the resulting evidence_index.json to verify:
+
+    1. solver_run.json appears as a ``solver_run_metadata`` evidence entry.
+    2. result.frd appears as a ``solver_raw_output`` evidence entry.
+    3. computed_metrics.json appears as a ``computed_metrics`` evidence entry.
+    4. Every evidence entry has auditable provenance: path, kind, role, supports.
+    5. No supports tag implies a claim has been validated or auto-advanced.
+    6. Neither ai/claim_map.json nor results/claim_map.json is written.
+
+    No external solver is needed; solver run artifacts are pre-injected into the
+    package.  This verifies the evidence production contract without claim
+    advancement.
+    """
+    from app.main import create_app, default_project, project_dir, save_project
+
+    settings = _make_patch_settings(tmp_path)
+    app_inst = create_app(settings)
+    client = TestClient(app_inst)
+
+    project = save_project(settings, default_project("evidence-claim-test"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "evidence.aieng"
+
+    # Build a package that looks like a completed CalculiX run.
+    metrics = {
+        "schema_version": "0.1",
+        "metrics_source": {"tool": "CalculiX", "format": "frd_extracted"},
+        "load_cases": [{
+            "load_case_id": "load_case_001",
+            "metrics": {
+                "max_von_mises_stress": {"value": 42.0, "unit": "MPa"},
+                "max_displacement": {"value": 0.03, "unit": "mm"},
+            },
+        }],
+    }
+    solver_run = {
+        "run_id": "run_001",
+        "solver": "CalculiX",
+        "state": "completed",
+        "solved": True,
+        "converged": None,
+        "return_code": 0,
+        "started_at": "2026-05-18T12:00:00+00:00",
+        "finished_at": "2026-05-18T12:00:01+00:00",
+        "duration_seconds": 1.0,
+        "input_files": ["simulation/runs/run_001/solver_input.inp"],
+        "output_files": ["simulation/runs/run_001/outputs/result.frd"],
+        "log_file": "simulation/runs/run_001/solver_log.txt",
+        "warnings": [],
+        "errors": [],
+    }
+    with zipfile.ZipFile(pkg_path, "w", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("manifest.json", json.dumps({"model_id": "evidence-claim-test", "resources": {}}))
+        zf.writestr("results/computed_metrics.json", json.dumps(metrics))
+        zf.writestr("simulation/runs/run_001/solver_run.json", json.dumps(solver_run))
+        zf.writestr("simulation/runs/run_001/outputs/result.frd", "** CalculiX FRD stub\n")
+        zf.writestr("simulation/runs/run_001/solver_log.txt", "CalculiX complete\n")
+
+    project["aieng_file"] = "evidence.aieng"
+    save_project(settings, project)
+
+    # refresh_cae_summary generates result_summary.json, evidence_index.json,
+    # and postprocessing_summary.md.  It must NOT touch claim_map.
+    refresh_resp = client.post(
+        "/api/runtime/runs",
+        json={
+            "message": "refresh cae summary",
+            "project_id": project_id,
+            "tool_input": {"project_id": project_id, "overwrite": True},
+        },
+    )
+    assert refresh_resp.status_code == 200
+    assert refresh_resp.json()["status"] == "completed"
+
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        pkg_names = set(zf.namelist())
+        assert "results/evidence_index.json" in pkg_names
+        evidence = json.loads(zf.read("results/evidence_index.json"))
+
+    assert evidence.get("evidence_type") == "cae_artifacts"
+    entries_by_path = {e["path"]: e for e in evidence["entries"]}
+
+    # 1. solver_run.json is catalogued as solver execution evidence.
+    sr = entries_by_path.get("simulation/runs/run_001/solver_run.json")
+    assert sr is not None, "evidence_index must contain simulation/runs/run_001/solver_run.json"
+    assert sr["kind"] == "result"
+    assert sr["role"] == "solver_run_metadata"
+    assert sr["exists"] is True
+    assert "solver_execution_evidence" in sr["supports"]
+
+    # 2. result.frd is catalogued as raw solver output (source for numerical extraction).
+    frd = entries_by_path.get("simulation/runs/run_001/outputs/result.frd")
+    assert frd is not None, "evidence_index must contain simulation/runs/run_001/outputs/result.frd"
+    assert frd["kind"] == "result"
+    assert frd["role"] == "solver_raw_output"
+    assert frd["exists"] is True
+    assert "numerical_result_source" in frd["supports"]
+
+    # 3. computed_metrics.json is catalogued with the correct evidence kind.
+    cm = entries_by_path.get("results/computed_metrics.json")
+    assert cm is not None, "evidence_index must contain results/computed_metrics.json"
+    assert cm["kind"] == "computed_metrics"
+    assert cm["exists"] is True
+    assert cm["supports"]  # non-empty
+
+    # 4. result_summary.json appears in the catalog.  exists=False is expected
+    #    because the evidence_index is generated before the summary is written;
+    #    the file will be present in the zip after the write completes.
+    rs = entries_by_path.get("results/result_summary.json")
+    assert rs is not None
+    assert rs["kind"] == "result"
+
+    # 5. Every present entry has auditable provenance: path, kind, role, supports.
+    for entry in evidence["entries"]:
+        if entry["exists"]:
+            assert entry.get("path"), f"evidence entry missing path: {entry}"
+            assert entry.get("kind"), f"evidence entry missing kind: {entry}"
+            assert entry.get("role"), f"evidence entry missing role: {entry}"
+            assert isinstance(entry.get("supports"), list), f"evidence entry supports must be a list: {entry}"
+
+    # 6. No supports tag implies a claim has been validated or auto-advanced.
+    # Solver output and metrics are evidence; claim advancement is a separate
+    # explicit workflow.
+    _CLAIM_ADVANCE_TERMS = {"validated", "claim_advanced", "claim_pass", "accepted_claim"}
+    for entry in evidence["entries"]:
+        for tag in entry.get("supports", []):
+            assert not any(t in tag.lower() for t in _CLAIM_ADVANCE_TERMS), (
+                f"entry {entry['path']!r} has a supports tag implying claim "
+                f"advancement: {tag!r}"
+            )
+
+    # 7. Neither possible claim_map path is written by refresh_cae_summary.
+    assert "ai/claim_map.json" not in pkg_names
+    assert "results/claim_map.json" not in pkg_names
+
+
 def test_write_artifact_to_package_adds_new_file(tmp_path: Path) -> None:
     """write_artifact_to_package inserts a new file into an .aieng package."""
     from app.main import write_artifact_to_package
