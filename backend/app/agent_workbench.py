@@ -457,6 +457,82 @@ def list_workflows() -> list[dict[str, Any]]:
     return [dict(item) for item in WORKFLOW_DEFINITIONS]
 
 
+def list_chat_connections(settings: Any) -> list[dict[str, Any]]:
+    """Return UI-facing chat connection options.
+
+    The workbench is allowed to orchestrate agents and external tools, while
+    the `.aieng` core remains a package/evidence format. This catalog keeps
+    those transport choices explicit for the frontend chat window.
+    """
+    runtime_tools = _rt.registered_tools_info()
+    tool_names = {str(tool.get("name")) for tool in runtime_tools}
+    capabilities = list_capabilities(settings)
+    mcp_caps = [
+        cap for cap in capabilities
+        if str(cap.get("source") or "").lower().endswith("mcp")
+        or str(cap.get("source") or "").lower().find("mcp") >= 0
+    ]
+    executable_mcp_tools = [name for name in tool_names if name.startswith("mcp.")]
+
+    local_status = "ready" if runtime_tools else "blocked"
+    mcp_registry_available = any(cap.get("available") for cap in mcp_caps)
+    mcp_status = "ready" if executable_mcp_tools else "degraded" if mcp_registry_available else "blocked"
+    freecad_ready = bool(getattr(settings, "freecad_cmd", Path()).exists())
+    freecad_status = "ready" if freecad_ready else "degraded"
+
+    return [
+        {
+            "id": "llm-api",
+            "label": "LLM API",
+            "transport": "provider-api",
+            "status": "configurable",
+            "detail": "Uses the configured model provider for planning, then routes executable steps through the local approval-gated runtime.",
+            "requires_project": False,
+            "supports_llm": True,
+            "supports_execution": True,
+            "approval_gated": True,
+            "tool_count": len(runtime_tools),
+        },
+        {
+            "id": "local-runtime",
+            "label": "Local runtime",
+            "transport": "fastapi-runtime",
+            "status": local_status,
+            "detail": "Uses the built-in intent planner and registered runtime tools without requiring an LLM API key.",
+            "requires_project": False,
+            "supports_llm": False,
+            "supports_execution": True,
+            "approval_gated": True,
+            "tool_count": len(runtime_tools),
+        },
+        {
+            "id": "mcp-bridge",
+            "label": "MCP bridge",
+            "transport": "freecad-mcp",
+            "status": mcp_status,
+            "detail": "Inspects MCP guardrails, parses patch proposals, and performs preflight checks through registered bridge tools.",
+            "requires_project": True,
+            "supports_llm": False,
+            "supports_execution": True,
+            "approval_gated": True,
+            "tool_count": len(executable_mcp_tools),
+            "registry_count": len(mcp_caps),
+        },
+        {
+            "id": "freecad-desktop",
+            "label": "FreeCAD desktop",
+            "transport": "freecadcmd-bridge",
+            "status": freecad_status,
+            "detail": "Routes geometry inspection and approved CAD-side actions through the configured FreeCADCmd bridge.",
+            "requires_project": True,
+            "supports_llm": False,
+            "supports_execution": True,
+            "approval_gated": True,
+            "tool_count": len([name for name in tool_names if name.startswith("freecad.") or name.startswith("cad.")]),
+        },
+    ]
+
+
 def list_benchmark_scenarios(settings: Any) -> list[dict[str, Any]]:
     root = settings.aieng_root / "benchmarks" / "ai_usefulness" / "scenarios"
     if not root.exists():

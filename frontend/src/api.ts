@@ -1,4 +1,4 @@
-import type { AgentPlan, AgentRunResponse, ArtifactDiffResponse, ArtifactResponse, BenchmarkRun, BenchmarkScenario, CaeArtifactDetection, CaePreprocessingSummary, CaeSimulationRunSummary, CapabilityDescriptor, CapabilityPreview, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeEvent, RuntimeRun, RuntimeRunSummary, RuntimeToolInfo, SolverFieldDescriptor, WorkflowDefinition, WorkflowStep } from "./types";
+import type { AgentPlan, AgentRunResponse, ArtifactDiffResponse, ArtifactResponse, BenchmarkRun, BenchmarkScenario, CaeArtifactDetection, CaePreprocessingSummary, CaeSimulationRunSummary, CapabilityDescriptor, CapabilityPreview, ChatConnection, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeEvent, RuntimeRun, RuntimeRunSummary, RuntimeToolInfo, SolverFieldDescriptor, WorkflowDefinition, WorkflowStep } from "./types";
 
 const API = import.meta.env.VITE_API_BASE ?? "http://127.0.0.1:8000";
 
@@ -81,6 +81,7 @@ export const api = {
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(payload),
     }),
+  listAgentConnections: () => request<ChatConnection[]>("/api/agent/connections"),
   listBenchmarkScenarios: () => request<BenchmarkScenario[]>("/api/benchmarks/scenarios"),
   startBenchmarkRun: (payload: {
     scenario_id: string;

@@ -991,6 +991,24 @@ def test_agent_run_without_project_completes_with_empty_safe_plan(tmp_path: Path
     assert data["run"]["project_id"] is None
 
 
+def test_agent_connections_endpoint_describes_non_api_chat_paths(tmp_path: Path) -> None:
+    settings = _make_runtime_settings(tmp_path)
+    client = TestClient(create_app(settings))
+
+    response = client.get("/api/agent/connections")
+
+    assert response.status_code == 200
+    connections = response.json()
+    ids = {item["id"] for item in connections}
+    assert {"llm-api", "local-runtime", "mcp-bridge", "freecad-desktop"}.issubset(ids)
+    local_runtime = next(item for item in connections if item["id"] == "local-runtime")
+    mcp_bridge = next(item for item in connections if item["id"] == "mcp-bridge")
+    assert local_runtime["supports_llm"] is False
+    assert local_runtime["supports_execution"] is True
+    assert mcp_bridge["requires_project"] is True
+    assert "api_key" not in json.dumps(connections).lower()
+
+
 # ── Phase 2: freecad.inspect_geometry tests ───────────────────────────────────
 
 def test_freecad_inspect_geometry_success_via_mocked_bridge(monkeypatch, tmp_path: Path) -> None:
