@@ -2421,6 +2421,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             "run": _rt.run_to_dict(run),
         }
 
+    @app.get("/api/agent/connections")
+    def list_agent_connections() -> list[dict[str, Any]]:
+        return agent_workbench.list_chat_connections(active_settings)
+
     @app.get("/api/benchmarks/scenarios")
     def list_benchmark_scenarios() -> list[dict[str, Any]]:
         return agent_workbench.list_benchmark_scenarios(active_settings)

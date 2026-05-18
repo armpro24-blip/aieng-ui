@@ -1,0 +1,177 @@
+name: PR Risk Report
+
+on:
+  pull_request_target:
+    types: [opened, reopened, synchronize, ready_for_review]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  issues: write
+  pull-requests: read
+
+jobs:
+  pr-risk-report:
+    name: Comment PR file-impact risk
+    if: github.event_name == 'pull_request_target'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Build and publish risk report
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const marker = '<!-- aieng-ui-pr-risk-report -->';
+            const { owner, repo } = context.repo;
+            const pull_number = context.payload.pull_request.number;
+            const pr = context.payload.pull_request;
+
+            const files = await github.paginate(github.rest.pulls.listFiles, {
+              owner,
+              repo,
+              pull_number,
+              per_page: 100,
+            });
+
+            const pathRules = [
+              { name: 'GitHub Actions / release automation', pattern: /^\.github\/workflows\//, score: 5, checks: ['Review workflow permissions and trigger choice.', 'Confirm no untrusted PR code is executed under pull_request_target.'] },
+              { name: 'Backend runtime / API surface', pattern: /^backend\/app\/(main|runtime|agent_engine|agent_workbench|aieng_bridge|freecad_bridge)\.py$/, score: 5, checks: ['Run backend API tests.', 'Check approval-gated operations and audit logging behavior.'] },
+              { name: 'Backend provider adapter', pattern: /^backend\/app\/providers\//, score: 4, checks: ['Verify provider fallback and runtime probe behavior.'] },
+              { name: 'Frontend workbench UI', pattern: /^frontend\/src\/(App|api|types)\.tsx?$/, score: 4, checks: ['Run frontend build.', 'Smoke-test chat/runtime flows in the browser.'] },
+              { name: 'Frontend styling', pattern: /^frontend\/src\/.*\.css$/, score: 2, checks: ['Check responsive layout and text overflow.'] },
+              { name: 'Dependency lock / package metadata', pattern: /(^|\/)(package-lock\.json|package\.json|pyproject\.toml|uv\.lock)$/, score: 4, checks: ['Review dependency drift and lockfile intent.'] },
+              { name: 'Backend tests', pattern: /^backend\/tests\//, score: 2, checks: ['Confirm tests cover behavior rather than snapshots only.'] },
+              { name: 'Documentation', pattern: /(^README\.md$|^docs\/|\.md$)/, score: 1, checks: ['Check docs match implemented behavior.'] },
+            ];
+
+            const extRisk = new Map([
+              ['.py', 2],
+              ['.tsx', 2],
+              ['.ts', 2],
+              ['.js', 2],
+              ['.json', 1],
+              ['.yml', 2],
+              ['.yaml', 2],
+              ['.toml', 2],
+              ['.lock', 2],
+            ]);
+
+            function extensionOf(path) {
+              const match = path.match(/(\.[^./]+)$/);
+              return match ? match[1].toLowerCase() : '';
+            }
+
+            function fileRisk(file) {
+              const matchedRules = pathRules.filter((rule) => rule.pattern.test(file.filename));
+              const ruleScore = matchedRules.reduce((max, rule) => Math.max(max, rule.score), 0);
+              const extScore = extRisk.get(extensionOf(file.filename)) ?? 1;
+              const churn = (file.additions || 0) + (file.deletions || 0);
+              const churnScore = churn >= 500 ? 5 : churn >= 200 ? 4 : churn >= 80 ? 3 : churn >= 25 ? 2 : 1;
+              const statusScore = file.status === 'removed' ? 4 : file.status === 'renamed' ? 3 : file.status === 'modified' ? 2 : 1;
+              const score = Math.min(10, ruleScore + extScore + churnScore + statusScore - 2);
+              return {
+                ...file,
+                riskScore: score,
+                matchedAreas: matchedRules.map((rule) => rule.name),
+                recommendedChecks: [...new Set(matchedRules.flatMap((rule) => rule.checks))],
+              };
+            }
+
+            const assessed = files.map(fileRisk).sort((a, b) => b.riskScore - a.riskScore || b.changes - a.changes);
+            const totalAdditions = files.reduce((sum, file) => sum + (file.additions || 0), 0);
+            const totalDeletions = files.reduce((sum, file) => sum + (file.deletions || 0), 0);
+            const totalChanges = totalAdditions + totalDeletions;
+            const maxFileRisk = assessed[0]?.riskScore ?? 0;
+            const criticalCount = assessed.filter((file) => file.riskScore >= 8).length;
+            const highCount = assessed.filter((file) => file.riskScore >= 6).length;
+            const broadChangePenalty = files.length >= 30 ? 2 : files.length >= 12 ? 1 : 0;
+            const churnPenalty = totalChanges >= 1000 ? 2 : totalChanges >= 400 ? 1 : 0;
+            const overallScore = Math.min(10, maxFileRisk + broadChangePenalty + churnPenalty);
+            const level = overallScore >= 8 ? 'High' : overallScore >= 5 ? 'Medium' : 'Low';
+            const badge = level === 'High' ? '[HIGH]' : level === 'Medium' ? '[MEDIUM]' : '[LOW]';
+
+            const areas = new Map();
+            for (const file of assessed) {
+              const area = file.filename.split('/')[0] || file.filename;
+              const current = areas.get(area) ?? { files: 0, changes: 0, maxRisk: 0 };
+              current.files += 1;
+              current.changes += file.changes || 0;
+              current.maxRisk = Math.max(current.maxRisk, file.riskScore);
+              areas.set(area, current);
+            }
+
+            const areaRows = [...areas.entries()]
+              .sort((a, b) => b[1].maxRisk - a[1].maxRisk || b[1].changes - a[1].changes)
+              .map(([area, data]) => `| \`${area}\` | ${data.files} | ${data.changes} | ${data.maxRisk}/10 |`)
+              .join('\n') || '| _none_ | 0 | 0 | 0/10 |';
+
+            const fileRows = assessed.slice(0, 20).map((file) => {
+              const areas = file.matchedAreas.length ? file.matchedAreas.join('<br>') : 'General';
+              return `| \`${file.filename}\` | ${file.status} | +${file.additions}/-${file.deletions} | ${file.riskScore}/10 | ${areas} |`;
+            }).join('\n') || '| _none_ | - | - | 0/10 | - |';
+
+            const recommendedChecks = [...new Set(assessed.flatMap((file) => file.recommendedChecks))];
+            if (files.some((file) => file.filename.startsWith('backend/'))) {
+              recommendedChecks.push('Run `python -m pytest -c NUL tests/test_api.py -q` from `backend/`.');
+            }
+            if (files.some((file) => file.filename.startsWith('frontend/'))) {
+              recommendedChecks.push('Run `npm run build` from `frontend/`.');
+            }
+            if (files.some((file) => file.filename.startsWith('.github/workflows/'))) {
+              recommendedChecks.push('Manually inspect workflow token permissions and branch/fork behavior.');
+            }
+
+            const checksBlock = recommendedChecks.length
+              ? recommendedChecks.map((item) => `- ${item}`).join('\n')
+              : '- No special checks detected beyond normal review.';
+
+            const body = [
+              marker,
+              `## ${badge} PR Risk Report: ${level} (${overallScore}/10)`,
+              '',
+              'This automated report estimates file-impact risk from PR metadata only. It does not execute PR code or judge implementation correctness.',
+              '',
+              `**PR:** #${pull_number} ${pr.title}`,
+              `**Files changed:** ${files.length}`,
+              `**Churn:** +${totalAdditions} / -${totalDeletions}`,
+              `**High-risk files:** ${highCount}`,
+              `**Critical-risk files:** ${criticalCount}`,
+              '',
+              '### Impact by Area',
+              '| Area | Files | Changed lines | Max file risk |',
+              '|---|---:|---:|---:|',
+              areaRows,
+              '',
+              '### Highest Impact Files',
+              '| File | Status | Churn | Risk | Matched area |',
+              '|---|---|---:|---:|---|',
+              fileRows,
+              '',
+              '### Suggested Checks',
+              checksBlock,
+              '',
+              `_Generated by \`${context.workflow}\` on commit \`${pr.head.sha.slice(0, 7)}\`._`,
+            ].join('\n');
+
+            const comments = await github.paginate(github.rest.issues.listComments, {
+              owner,
+              repo,
+              issue_number: pull_number,
+              per_page: 100,
+            });
+            const existing = comments.find((comment) => comment.body && comment.body.includes(marker));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner,
+                repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner,
+                repo,
+                issue_number: pull_number,
+                body,
+              });
+            }

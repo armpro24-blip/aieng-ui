@@ -553,6 +553,20 @@ export type AgentRunResponse = {
   run: RuntimeRun;
 };
 
+export type ChatConnection = {
+  id: "llm-api" | "local-runtime" | "mcp-bridge" | "freecad-desktop" | string;
+  label: string;
+  transport: string;
+  status: "ready" | "configurable" | "degraded" | "blocked" | string;
+  detail: string;
+  requires_project: boolean;
+  supports_llm: boolean;
+  supports_execution: boolean;
+  approval_gated: boolean;
+  tool_count: number;
+  registry_count?: number;
+};
+
 export type ChatStep = {
   tool: string;
   description: string;

@@ -5,7 +5,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 
 import { api } from "./api";
-import type { AgentPlan, ArtifactDiff, ArtifactResponse, BenchmarkRun, BenchmarkScenario, CapabilityDescriptor, CapabilityPreview, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeRun, SolverFieldDescriptor, WorkflowDefinition } from "./types";
+import type { AgentPlan, ArtifactDiff, ArtifactResponse, BenchmarkRun, BenchmarkScenario, CapabilityDescriptor, CapabilityPreview, ChatConnection, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeRun, SolverFieldDescriptor, WorkflowDefinition } from "./types";
 
 // Status labels for runtime runs
 function runtimeStatusLabel(status: RuntimeRun["status"]): string {
@@ -82,6 +82,57 @@ const CONTROL_PANE_MODES: Array<{ id: ControlPaneMode; label: string; detail: st
   { id: "project", label: "项目数据", detail: "导入与语义摘要" },
   { id: "agent", label: "能力中心", detail: "工具、工作流与评测" },
   { id: "cae", label: "CAE 证据", detail: "仿真设置与结果" },
+];
+
+const DEFAULT_CHAT_CONNECTIONS: ChatConnection[] = [
+  {
+    id: "llm-api",
+    label: "LLM API",
+    transport: "provider-api",
+    status: "configurable",
+    detail: "模型 Provider 规划，本地 runtime 执行。",
+    requires_project: false,
+    supports_llm: true,
+    supports_execution: true,
+    approval_gated: true,
+    tool_count: 0,
+  },
+  {
+    id: "local-runtime",
+    label: "Local runtime",
+    transport: "fastapi-runtime",
+    status: "ready",
+    detail: "无 API key 的本地规则编排。",
+    requires_project: false,
+    supports_llm: false,
+    supports_execution: true,
+    approval_gated: true,
+    tool_count: 0,
+  },
+  {
+    id: "mcp-bridge",
+    label: "MCP bridge",
+    transport: "freecad-mcp",
+    status: "degraded",
+    detail: "桥接 guardrail、patch 解析和 preflight。",
+    requires_project: true,
+    supports_llm: false,
+    supports_execution: true,
+    approval_gated: true,
+    tool_count: 0,
+  },
+  {
+    id: "freecad-desktop",
+    label: "FreeCAD desktop",
+    transport: "freecadcmd-bridge",
+    status: "degraded",
+    detail: "通过 FreeCADCmd 做几何检查和受控 CAD 动作。",
+    requires_project: true,
+    supports_llm: false,
+    supports_execution: true,
+    approval_gated: true,
+    tool_count: 0,
+  },
 ];
 
 function jsonBlock(value: unknown) {
@@ -1205,6 +1256,8 @@ export default function App() {
   const [benchmarkRun, setBenchmarkRun] = useState<BenchmarkRun | null>(null);
   const [benchmarkBusy, setBenchmarkBusy] = useState(false);
   const [llmConfig, setLlmConfig] = useState<LLMConfig>(DEFAULT_LLM_CONFIG);
+  const [chatConnections, setChatConnections] = useState<ChatConnection[]>(DEFAULT_CHAT_CONNECTIONS);
+  const [selectedChatConnectionId, setSelectedChatConnectionId] = useState<string>("llm-api");
   const [controlPaneMode, setControlPaneMode] = useState<ControlPaneMode>("chat");
   const [agentPlan, setAgentPlan] = useState<AgentPlan | null>(null);
   const [agentBusy, setAgentBusy] = useState(false);
@@ -1249,6 +1302,12 @@ export default function App() {
   const summaryViewerFormat = typeof summary?.viewer?.asset_format === "string" ? summary.viewer.asset_format : null;
   const effectiveViewerFormat = resolveAssetFormat(rawViewerUrl, summaryViewerFormat ?? selectedProject?.web_asset_format ?? null);
   const llmReady = useMemo(() => isLlmConfigReady(llmConfig), [llmConfig]);
+  const selectedChatConnection = useMemo(
+    () => chatConnections.find((item) => item.id === selectedChatConnectionId) ?? chatConnections[0] ?? DEFAULT_CHAT_CONNECTIONS[0],
+    [chatConnections, selectedChatConnectionId],
+  );
+  const selectedConnectionBlocked = selectedChatConnection.requires_project && !selectedId;
+  const chatBusy = agentBusy || busy;
   const availableMcpCapabilityCount = useMemo(
     () => capabilities.filter((item) => item.available && String(item.source).toLowerCase().includes("mcp")).length,
     [capabilities],
@@ -1324,10 +1383,11 @@ export default function App() {
       if (cancelled) return;
       setRuntime(runtimeSnapshot);
       setRuntimeDraft(runtimeSnapshot.config);
-      const [nextCapabilities, nextWorkflows, nextScenarios] = await Promise.all([
+      const [nextCapabilities, nextWorkflows, nextScenarios, nextConnections] = await Promise.all([
         api.listCapabilities().catch(() => []),
         api.listWorkflows().catch(() => []),
         api.listBenchmarkScenarios().catch(() => []),
+        api.listAgentConnections().catch(() => DEFAULT_CHAT_CONNECTIONS),
       ]);
       if (cancelled) return;
       setCapabilities(nextCapabilities);
@@ -1336,6 +1396,7 @@ export default function App() {
       setSelectedWorkflowId(nextWorkflows[0]?.id ?? "");
       setBenchmarkScenarios(nextScenarios);
       setSelectedScenarioId(nextScenarios[0]?.id ?? "");
+      setChatConnections(nextConnections.length ? nextConnections : DEFAULT_CHAT_CONNECTIONS);
       const list = await api.listProjects();
       if (cancelled) return;
       setProjects(list);
@@ -1648,14 +1709,16 @@ export default function App() {
 
   async function refreshAgentWorkbench() {
     await runBusyTask(async () => {
-      const [nextCapabilities, nextWorkflows, nextScenarios] = await Promise.all([
+      const [nextCapabilities, nextWorkflows, nextScenarios, nextConnections] = await Promise.all([
         api.listCapabilities(),
         api.listWorkflows(),
         api.listBenchmarkScenarios(),
+        api.listAgentConnections().catch(() => DEFAULT_CHAT_CONNECTIONS),
       ]);
       setCapabilities(nextCapabilities);
       setWorkflows(nextWorkflows);
       setBenchmarkScenarios(nextScenarios);
+      setChatConnections(nextConnections.length ? nextConnections : DEFAULT_CHAT_CONNECTIONS);
       setSelectedCapabilityName((current) => current || nextCapabilities[0]?.name || "");
       setSelectedWorkflowId((current) => current || nextWorkflows[0]?.id || "");
       setSelectedScenarioId((current) => current || nextScenarios[0]?.id || "");
@@ -1764,8 +1827,8 @@ export default function App() {
     }
   }
 
-  async function submitRuntime() {
-    const prompt = message.trim();
+  async function submitRuntime(promptOverride?: string) {
+    const prompt = (promptOverride ?? message).trim();
     if (!prompt) {
       setNotice({ tone: "info", title: "请输入请求", detail: "本地运行时需要一条自然语言指令。" });
       return;
@@ -2043,6 +2106,48 @@ export default function App() {
     } finally {
       setAgentBusy(false);
     }
+  }
+
+  async function planSelectedChatConnection() {
+    if (selectedConnectionBlocked) {
+      setNotice({ tone: "info", title: "请选择项目", detail: `${selectedChatConnection.label} 需要当前项目上下文。` });
+      return;
+    }
+    if (selectedChatConnection.id === "llm-api") {
+      await planAgentChat();
+      return;
+    }
+    if (selectedChatConnection.id === "mcp-bridge") {
+      await submitChat("plan");
+      return;
+    }
+    if (selectedChatConnection.id === "freecad-desktop") {
+      const prompt = message.trim();
+      await submitRuntime(`inspect geometry through FreeCAD bridge. User request: ${prompt || "inspect current project geometry"}`);
+      return;
+    }
+    await submitRuntime();
+  }
+
+  async function runSelectedChatConnection() {
+    if (selectedConnectionBlocked) {
+      setNotice({ tone: "info", title: "请选择项目", detail: `${selectedChatConnection.label} 需要当前项目上下文。` });
+      return;
+    }
+    if (selectedChatConnection.id === "llm-api") {
+      await runAgentChat();
+      return;
+    }
+    if (selectedChatConnection.id === "mcp-bridge") {
+      await submitChat("execute");
+      return;
+    }
+    if (selectedChatConnection.id === "freecad-desktop") {
+      const prompt = message.trim();
+      await submitRuntime(`inspect geometry through FreeCAD bridge. User request: ${prompt || "inspect current project geometry"}`);
+      return;
+    }
+    await submitRuntime();
   }
 
   async function submitChat(mode: "plan" | "execute") {
@@ -3149,31 +3254,49 @@ export default function App() {
               </button>
             </div>
 
+            <div className="chat-connection-grid" role="tablist" aria-label="Chat connection">
+              {chatConnections.map((connection) => (
+                <button
+                  key={connection.id}
+                  type="button"
+                  className={connection.id === selectedChatConnectionId ? "chat-connection-card active" : "chat-connection-card"}
+                  onClick={() => setSelectedChatConnectionId(connection.id)}
+                  aria-selected={connection.id === selectedChatConnectionId}
+                >
+                  <span className={`connection-status status-${connection.status}`}>{connection.status}</span>
+                  <strong>{connection.label}</strong>
+                  <small>{connection.transport}</small>
+                </button>
+              ))}
+            </div>
+
             <div className="agent-chat-strip">
               <div>
-                <strong>{agentPlan ? `当前计划：${agentPlan.steps.length} 步 / ${agentPlan.mode}` : "模型驱动编排"}</strong>
+                <strong>{agentPlan ? `当前计划：${agentPlan.steps.length} 步 / ${agentPlan.mode}` : selectedChatConnection.label}</strong>
                 <span>
                   {agentPlan
                     ? agentPlan.preview.warnings[0] || (agentPlan.requires_approval ? "包含人工审批节点" : "当前计划无需人工审批")
-                    : llmReady
-                      ? `${getLlmProviderLabel(llmConfig.provider)} / ${llmConfig.model}，可规划运行时与 MCP 工具调用。`
-                      : "模型 Provider 未完成配置，当前使用规则规划兜底。"}
+                    : selectedConnectionBlocked
+                      ? "当前连接需要先选择项目。"
+                      : selectedChatConnection.id === "llm-api" && !llmReady
+                        ? "模型 Provider 未完成配置，当前会回落到规则规划。"
+                        : selectedChatConnection.detail}
                 </span>
               </div>
               <div className="capability-facts llm-console-facts">
-                <div><span>供应商</span><strong>{getLlmProviderLabel(llmConfig.provider)}</strong></div>
-                <div><span>模型</span><strong>{llmConfig.model}</strong></div>
-                <div><span>MCP 能力</span><strong>{availableMcpCapabilityCount}</strong></div>
-                <div><span>可执行 MCP</span><strong>{executableMcpToolCount}</strong></div>
-                <div><span>规划模式</span><strong>{llmReady ? "模型优先" : "规则兜底"}</strong></div>
+                <div><span>连接</span><strong>{selectedChatConnection.transport}</strong></div>
+                <div><span>状态</span><strong>{selectedChatConnection.status}</strong></div>
+                <div><span>工具数</span><strong>{selectedChatConnection.tool_count}</strong></div>
+                <div><span>审批</span><strong>{selectedChatConnection.approval_gated ? "启用" : "不需要"}</strong></div>
+                <div><span>规划模式</span><strong>{selectedChatConnection.supports_llm && llmReady ? "模型优先" : "本地规则"}</strong></div>
                 <div><span>项目</span><strong>{selectedProject?.name ?? selectedId ?? "-"}</strong></div>
               </div>
               <div className="agent-chat-actions">
-                <button disabled={agentBusy} onClick={() => void planAgentChat()}>
-                  生成计划
+                <button disabled={chatBusy || selectedConnectionBlocked} onClick={() => void planSelectedChatConnection()}>
+                  {selectedChatConnection.id === "local-runtime" || selectedChatConnection.id === "freecad-desktop" ? "发送" : "生成计划"}
                 </button>
-                <button className="ghost-button" disabled={agentBusy} onClick={() => void runAgentChat()}>
-                  执行计划
+                <button className="ghost-button" disabled={chatBusy || selectedConnectionBlocked} onClick={() => void runSelectedChatConnection()}>
+                  {selectedChatConnection.id === "mcp-bridge" ? "执行安全步骤" : "运行"}
                 </button>
                 <button className="ghost-button" type="button" onClick={openMcpCapabilities}>
                   查看工具
