@@ -5979,3 +5979,310 @@ def test_cae_generate_mesh_no_freecad_returns_error(tmp_path: Path) -> None:
         namelist = zf.namelist()
     mesh_names = [n for n in namelist if n.startswith("simulation/mesh/")]
     assert len(mesh_names) == 0, f"Unexpected mesh artifacts written: {mesh_names}"
+
+
+# ---------------------------------------------------------------------------
+# End-to-end real-pipeline smoke test: STEP -> mesh -> solver -> FRD -> summary
+# Doubly skipped: requires AIENG_TEST_REAL_FREECAD=1, FreeCADCmd, AND ccx.
+# Goes beyond test_cae_generate_mesh_real_freecad_integration (mesh only) and
+# test_run_solver_real_ccx_skipped_if_unavailable (pre-baked .inp) by composing
+# all four real runtime tools against real binaries with no mocks anywhere.
+# ---------------------------------------------------------------------------
+
+_FULL_REAL_PIPELINE_AVAILABLE = (
+    _REAL_FREECAD_AVAILABLE and shutil.which("ccx") is not None
+)
+
+
+def _make_cube_step_via_freecad(
+    freecad_cmd: Path,
+    out_step: Path,
+    length: float = 10.0,
+    width: float = 1.0,
+    height: float = 1.0,
+) -> None:
+    """Generate a tiny cube STEP file using FreeCADCmd.
+
+    Used only by the doubly-gated real-pipeline test; never runs in CI.
+    """
+    import subprocess
+
+    out_step.parent.mkdir(parents=True, exist_ok=True)
+    macro_path = out_step.parent / "_make_cube_macro.py"
+    out_posix = out_step.as_posix()
+    macro_path.write_text(
+        f'''
+import FreeCAD, Part
+doc = FreeCAD.newDocument("cube")
+box = doc.addObject("Part::Box", "Box")
+box.Length = {length}
+box.Width = {width}
+box.Height = {height}
+doc.recompute()
+Part.export([box], "{out_posix}")
+print("CUBE_STEP_WRITTEN:" + "{out_posix}")
+''',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [str(freecad_cmd), str(macro_path)],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    if not out_step.exists():
+        raise RuntimeError(
+            "FreeCADCmd cube generation produced no STEP file "
+            f"(exit {result.returncode}). stdout: {result.stdout!r} stderr: {result.stderr!r}"
+        )
+
+
+def _complete_solver_deck(mesh_inp_text: str) -> str:
+    """Turn a FreeCAD mesh-only .inp into a complete CalculiX static-step deck.
+
+    FreeCAD's ``FemMesh.write`` emits only ``*NODE`` and ``*ELEMENT`` blocks.
+    To drive ``ccx`` we need material, section, boundary, load, and output
+    requests. This helper:
+
+    - Reads every node coordinate.
+    - Picks the first volumetric element block (``C3D4/C3D8/C3D10/C3D20``)
+      and reuses its ``ELSET`` name for the ``*SOLID SECTION``.
+    - Builds a ``FIX`` nset from minimum-x nodes and a ``LOAD`` nset from
+      maximum-x nodes (within a 1e-3 relative tolerance).
+    - Appends ``*NSET``, ``*MATERIAL/*ELASTIC``, ``*SOLID SECTION``,
+      ``*STEP/*STATIC``, ``*BOUNDARY``, ``*CLOAD``, ``*NODE FILE``,
+      ``*EL FILE``, ``*END STEP``.
+
+    The tip load is distributed evenly across LOAD-nset nodes so total
+    applied force is independent of mesh density.
+    """
+    lines = mesh_inp_text.splitlines()
+    nodes: dict[int, tuple[float, float, float]] = {}
+    volumetric_elset: str | None = None
+
+    i = 0
+    while i < len(lines):
+        raw = lines[i]
+        stripped = raw.strip()
+        upper = stripped.upper()
+        is_node_header = (
+            upper.startswith("*NODE")
+            and not upper.startswith("*NODE FILE")
+            and not upper.startswith("*NODE PRINT")
+            and not upper.startswith("*NODE OUTPUT")
+        )
+        if is_node_header:
+            i += 1
+            while i < len(lines):
+                row = lines[i].strip()
+                if not row or row.startswith("*"):
+                    break
+                parts = [p.strip() for p in row.split(",")]
+                if len(parts) >= 4:
+                    try:
+                        node_id = int(parts[0])
+                        x = float(parts[1])
+                        y = float(parts[2])
+                        z = float(parts[3])
+                        nodes[node_id] = (x, y, z)
+                    except ValueError:
+                        pass
+                i += 1
+            continue
+        if upper.startswith("*ELEMENT") and volumetric_elset is None:
+            params: dict[str, str] = {}
+            for chunk in stripped.split(",")[1:]:
+                if "=" in chunk:
+                    k, v = chunk.split("=", 1)
+                    params[k.strip().upper()] = v.strip()
+            elem_type = params.get("TYPE", "").upper()
+            elset = params.get("ELSET", "")
+            if elem_type.startswith("C3D") and elset:
+                volumetric_elset = elset
+        i += 1
+
+    if not nodes:
+        raise ValueError("FreeCAD mesh .inp had no parseable *NODE entries")
+    if not volumetric_elset:
+        raise ValueError("FreeCAD mesh .inp had no volumetric (C3D*) *ELEMENT block")
+
+    xs = [coords[0] for coords in nodes.values()]
+    x_min, x_max = min(xs), max(xs)
+    tol = max((x_max - x_min) * 1e-3, 1e-6)
+    fix_ids = sorted(nid for nid, (x, _, _) in nodes.items() if abs(x - x_min) <= tol)
+    load_ids = sorted(nid for nid, (x, _, _) in nodes.items() if abs(x - x_max) <= tol)
+    if not fix_ids or not load_ids:
+        raise ValueError(
+            f"Degenerate NSETs from FreeCAD mesh: |FIX|={len(fix_ids)} |LOAD|={len(load_ids)}"
+        )
+
+    def _format_nset(name: str, ids: list[int]) -> str:
+        chunks = []
+        for k in range(0, len(ids), 16):
+            chunks.append(", ".join(str(i) for i in ids[k:k + 16]))
+        return f"*NSET, NSET={name}\n" + "\n".join(chunks)
+
+    per_node_load = -100.0 / len(load_ids)
+    addition = "\n".join([
+        "** --- AIENG real-pipeline smoke test deck completion ---",
+        _format_nset("FIX", fix_ids),
+        _format_nset("LOAD", load_ids),
+        "*MATERIAL, NAME=Steel",
+        "*ELASTIC",
+        "210000.0, 0.3",
+        f"*SOLID SECTION, ELSET={volumetric_elset}, MATERIAL=Steel",
+        "*STEP",
+        "*STATIC",
+        "*BOUNDARY",
+        "FIX, 1, 3, 0.0",
+        "*CLOAD",
+        f"LOAD, 2, {per_node_load:.6f}",
+        "*NODE FILE, NSET=LOAD",
+        "U",
+        "*EL FILE",
+        "S",
+        "*END STEP",
+        "",
+    ])
+    return mesh_inp_text.rstrip() + "\n" + addition
+
+
+@pytest.mark.skipif(
+    not _FULL_REAL_PIPELINE_AVAILABLE,
+    reason=(
+        "Requires AIENG_TEST_REAL_FREECAD=1, FreeCADCmd, AND ccx on host — "
+        "skipping full real pipeline."
+    ),
+)
+def test_full_real_pipeline_step_to_summary(tmp_path: Path) -> None:
+    """STEP -> real mesh -> real ccx -> real FRD -> real summary, no mocks.
+
+    Demonstrates the entire vertical CAE pipeline composing through the
+    runtime against real binaries. Asserts that ``extrema_computed`` flips
+    to true and that the reported stress and displacement are non-zero
+    real numbers (not synthetic placeholders).
+    """
+    import subprocess  # noqa: F401  (imported for side-effect parity with helpers)
+
+    from app.main import create_app, default_project, project_dir, save_project
+
+    settings = _make_patch_settings(tmp_path)
+    assert _FREECAD_CMD is not None  # skipif guarantees this
+    settings.freecad_home = _FREECAD_CMD.parents[1]
+    app_inst = create_app(settings)
+    client = TestClient(app_inst)
+
+    project = save_project(settings, default_project("real-full-pipeline"))
+    project_id = project["id"]
+    pkg_path = project_dir(settings, project_id) / "pipeline.aieng"
+
+    # 1. Generate a tiny cube STEP via FreeCADCmd (10x1x1 mm).
+    step_file = tmp_path / "fixtures" / "minimal_cube.step"
+    _make_cube_step_via_freecad(_FREECAD_CMD, step_file)
+    step_bytes = step_file.read_bytes()
+    assert step_bytes.startswith(b"ISO-10303-21") or len(step_bytes) > 100
+
+    # 2. Build the .aieng package: manifest + cube STEP + minimal CAE setup
+    #    (solver_settings, parsed_loads via _make_setup_package, plus a load_case).
+    _make_setup_package(
+        pkg_path,
+        extra={
+            "geometry/source.step": step_bytes,
+            "simulation/load_cases/load_case_001.json": {"id": "load_case_001", "loads": []},
+        },
+    )
+    project["aieng_file"] = "pipeline.aieng"
+    save_project(settings, project)
+
+    # 3. cae.generate_mesh (approval-gated) -- writes simulation/mesh/mesh_*.inp.
+    resp = client.post(
+        "/api/runtime/runs",
+        json={
+            "message": "generate mesh",
+            "project_id": project_id,
+            "tool_input": {
+                "project_id": project_id,
+                "mesh_size_mm": 2.0,
+                "element_type": "tetrahedral",
+                "output_format": "inp",
+            },
+        },
+    )
+    assert resp.status_code == 200
+    mesh_run = resp.json()
+    assert mesh_run["status"] == "awaiting_approval"
+    mesh_approve = client.post(f"/api/runtime/runs/{mesh_run['run_id']}/approve")
+    assert mesh_approve.status_code == 200
+    mesh_result = mesh_approve.json()["tool_results"][0]["output"]
+    assert mesh_result["ok"] is True, f"Mesh generation failed: {mesh_result}"
+    assert mesh_result["status"] == "completed"
+    mesh_pkg_path = mesh_result["mesh_artifact_path"]
+    assert mesh_pkg_path and mesh_pkg_path.startswith("simulation/mesh/")
+
+    # 4. Read the mesh-only .inp, append material/BC/load/output blocks, and
+    #    write the completed deck back into the package as a solver run input.
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        mesh_inp_text = zf.read(mesh_pkg_path).decode("utf-8", errors="replace")
+    solver_deck_text = _complete_solver_deck(mesh_inp_text)
+    with zipfile.ZipFile(pkg_path, "a", compression=zipfile.ZIP_DEFLATED) as zf:
+        zf.writestr("simulation/runs/run_001/solver_input.inp", solver_deck_text)
+
+    # 5. cae.run_solver (approval-gated) -- runs real ccx, writes solver_run.json,
+    #    solver_log.txt, and outputs/result.frd; with extract_results=True the
+    #    Phase 19 FRD parser also writes results/computed_metrics.json.
+    solver_data = _execute_run_solver(
+        client,
+        project_id,
+        {
+            "project_id": project_id,
+            "input_deck_path": "simulation/runs/run_001/solver_input.inp",
+            "extract_results": True,
+            "refresh_summary": False,
+        },
+    )
+    solver_result = solver_data["tool_results"][0]["output"]
+    assert solver_result["ok"] is True, f"Real ccx run failed: {solver_result}"
+    assert solver_result["solver_execution_performed"] is True
+    assert solver_result["return_code"] == 0
+    assert solver_result["status"] == "completed"
+
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        names = set(zf.namelist())
+        assert "simulation/runs/run_001/outputs/result.frd" in names
+        assert "simulation/runs/run_001/solver_run.json" in names
+        assert "simulation/runs/run_001/solver_log.txt" in names
+        assert "results/computed_metrics.json" in names
+        solver_run_json = json.loads(zf.read("simulation/runs/run_001/solver_run.json"))
+    assert solver_run_json["solver"] == "CalculiX"
+    assert solver_run_json["converged"] is None  # honest: ccx exit code is not convergence evidence
+
+    # 6. postprocess.refresh_cae_summary -- regenerates result_summary.json,
+    #    evidence_index.json, and postprocessing_summary.md from the real metrics.
+    refresh_resp = client.post(
+        "/api/runtime/runs",
+        json={
+            "message": "refresh cae summary",
+            "project_id": project_id,
+            "tool_input": {"project_id": project_id, "overwrite": True},
+        },
+    )
+    assert refresh_resp.status_code == 200
+    refresh_data = refresh_resp.json()
+    assert refresh_data["status"] == "completed", f"Summary refresh failed: {refresh_data}"
+
+    # 7. Final assertions on real numerical output served by the API.
+    sum_resp = client.get(f"/api/projects/{project_id}/cae-result-summary")
+    assert sum_resp.status_code == 200
+    summary = sum_resp.json()
+    cv = summary["computed_values"]
+    assert cv["extrema_computed"] is True
+    assert cv["max_displacement"] is not None
+    assert cv["max_displacement"]["value"] > 0.0
+    assert cv["max_von_mises_stress"] is not None
+    assert cv["max_von_mises_stress"]["value"] > 0.0
+    # Generous sanity bounds for a 10x1x1 mm steel cube under -100 N tip load:
+    # analytic tip deflection ~ FL^3/(3EI) ~ 0.06 mm; max stress ~ 6 MPa.
+    # Bounds intentionally loose to tolerate mesh-density and bc-distribution effects.
+    assert cv["max_displacement"]["value"] < 5.0           # mm
+    assert cv["max_von_mises_stress"]["value"] < 1.0e5     # MPa
+    assert len(summary["llm_summary"]["limitations"]) > 0
