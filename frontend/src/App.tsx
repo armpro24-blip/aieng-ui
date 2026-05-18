@@ -5,6 +5,7 @@ import { GLTFLoader } from "three/examples/jsm/loaders/GLTFLoader.js";
 import { STLLoader } from "three/examples/jsm/loaders/STLLoader.js";
 
 import { api } from "./api";
+import { useI18n, type Language } from "./i18n";
 import type { AgentPlan, ArtifactDiff, ArtifactResponse, BenchmarkRun, BenchmarkScenario, CapabilityDescriptor, CapabilityPreview, ChatConnection, ChatResponse, LLMConfig, ProjectRecord, ProjectSummary, RuntimeConfig, RuntimeConfigSnapshot, RuntimeRun, SolverFieldDescriptor, WorkflowDefinition } from "./types";
 
 // Status labels for runtime runs
@@ -49,19 +50,19 @@ type ViewerLoadState = "idle" | "loading" | "ready" | "error";
 type ControlPaneMode = "project" | "agent" | "cae" | "chat";
 
 const BASE_STAGES: StageItem[] = [
-  { key: "upload", label: "上传 STEP", detail: "把用户选择的 STEP 文件放入项目", state: "idle" },
-  { key: "import", label: "导入 aieng", detail: "生成 .aieng 包并自动补全 topology、AAG、feature 和摘要", state: "idle" },
-  { key: "preview", label: "生成预览", detail: "调用 FreeCADCmd 预览链并优先产出 GLB", state: "idle" },
-  { key: "semantic", label: "刷新语义信息", detail: "同步 manifest、topology、validation 和摘要", state: "idle" },
+  { key: "upload", label: "Upload STEP", detail: "Put the selected STEP file into the project", state: "idle" },
+  { key: "import", label: "Import aieng", detail: "Generate the .aieng package and enrich topology, AAG, features, and summary", state: "idle" },
+  { key: "preview", label: "Generate preview", detail: "Run the FreeCADCmd preview pipeline and prefer GLB output", state: "idle" },
+  { key: "semantic", label: "Refresh semantics", detail: "Sync manifest, topology, validation, and summary", state: "idle" },
 ];
 
 const CAD_PROVIDER_OPTIONS = [{ value: "freecad", label: "FreeCAD" }] as const;
 const LLM_CONFIG_STORAGE_KEY = "aieng-ui.llm-config";
 const LLM_PROVIDER_SUGGESTIONS = ["openai-compatible", "anthropic", "openai", "azure-openai"] as const;
 const CHAT_SUGGESTIONS = [
-  "总结当前模型的语义状态和主要风险",
-  "检查当前包是否已经具备执行 patch 的前提",
-  "给出减重但不破坏受保护区域的安全步骤",
+  "Summarize the current model semantics and main risks",
+  "Check whether the current package is ready for a patch",
+  "Give safe weight-reduction steps without changing protected regions",
 ] as const;
 
 const DEFAULT_LLM_CONFIG: LLMConfig = {
@@ -78,10 +79,10 @@ const DEFAULT_LLM_CONFIG: LLMConfig = {
 const EMPTY_CAE_FIELDS: string[] = [];
 
 const CONTROL_PANE_MODES: Array<{ id: ControlPaneMode; label: string; detail: string }> = [
-  { id: "chat", label: "智能编排", detail: "对话、计划与审批" },
-  { id: "project", label: "项目数据", detail: "导入与语义摘要" },
-  { id: "agent", label: "能力中心", detail: "工具、工作流与评测" },
-  { id: "cae", label: "CAE 证据", detail: "仿真设置与结果" },
+  { id: "chat", label: "Intelligent orchestration", detail: "Chat, planning, and approval" },
+  { id: "project", label: "Project data", detail: "Import and semantic summary" },
+  { id: "agent", label: "Capability center", detail: "Tools, workflows, and benchmarks" },
+  { id: "cae", label: "CAE evidence", detail: "Simulation setup and results" },
 ];
 
 const DEFAULT_CHAT_CONNECTIONS: ChatConnection[] = [
@@ -90,7 +91,7 @@ const DEFAULT_CHAT_CONNECTIONS: ChatConnection[] = [
     label: "LLM API",
     transport: "provider-api",
     status: "configurable",
-    detail: "模型 Provider 规划，本地 runtime 执行。",
+    detail: "Model provider planning with local runtime execution.",
     requires_project: false,
     supports_llm: true,
     supports_execution: true,
@@ -102,7 +103,7 @@ const DEFAULT_CHAT_CONNECTIONS: ChatConnection[] = [
     label: "Local runtime",
     transport: "fastapi-runtime",
     status: "ready",
-    detail: "无 API key 的本地规则编排。",
+    detail: "Local rule orchestration without an API key.",
     requires_project: false,
     supports_llm: false,
     supports_execution: true,
@@ -114,7 +115,7 @@ const DEFAULT_CHAT_CONNECTIONS: ChatConnection[] = [
     label: "MCP bridge",
     transport: "freecad-mcp",
     status: "degraded",
-    detail: "桥接 guardrail、patch 解析和 preflight。",
+    detail: "Bridges guardrails, patch parsing, and preflight.",
     requires_project: true,
     supports_llm: false,
     supports_execution: true,
@@ -126,7 +127,7 @@ const DEFAULT_CHAT_CONNECTIONS: ChatConnection[] = [
     label: "FreeCAD desktop",
     transport: "freecadcmd-bridge",
     status: "degraded",
-    detail: "通过 FreeCADCmd 做几何检查和受控 CAD 动作。",
+    detail: "Runs geometry checks and controlled CAD actions through FreeCADCmd.",
     requires_project: true,
     supports_llm: false,
     supports_execution: true,
@@ -1215,17 +1216,89 @@ function RuntimeSettingsDrawer({
   );
 }
 
+type GlobalSettingsDrawerProps = {
+  open: boolean;
+  onClose(): void;
+};
+
+const LANGUAGE_OPTIONS: Array<{ value: Language; label: string; description: string }> = [
+  { value: "en", label: "English", description: "Default" },
+  { value: "zh-CN", label: "中文", description: "简体中文" },
+];
+
+function GlobalSettingsDrawer({ open, onClose }: GlobalSettingsDrawerProps) {
+  const { language, setLanguage } = useI18n();
+  const currentLanguage = LANGUAGE_OPTIONS.find((option) => option.value === language) ?? LANGUAGE_OPTIONS[0];
+
+  if (!open) return null;
+
+  return (
+    <div className="drawer-backdrop" onClick={onClose}>
+      <aside
+        className="settings-drawer global-settings-drawer"
+        role="dialog"
+        aria-modal="true"
+        aria-label="全局设置"
+        onClick={(event) => event.stopPropagation()}
+      >
+        <div className="drawer-header">
+          <div>
+            <h2>全局设置</h2>
+            <p>管理工作台偏好和界面显示。环境配置仍保留在专用抽屉中。</p>
+          </div>
+          <button type="button" className="ghost-button drawer-close" onClick={onClose}>
+            关闭
+          </button>
+        </div>
+
+        <div className="drawer-body">
+          <section className="drawer-section">
+            <div className="drawer-section-heading">
+              <div>
+                <h3>界面设置</h3>
+                <p>选择工作台界面的显示语言。</p>
+              </div>
+            </div>
+
+            <div className="global-setting-row">
+              <div>
+                <strong>语言</strong>
+                <span>当前语言: <span data-i18n-skip>{currentLanguage.label}</span></span>
+              </div>
+              <div className="language-choice-group" role="radiogroup" aria-label="语言">
+                {LANGUAGE_OPTIONS.map((option) => (
+                  <button
+                    key={option.value}
+                    type="button"
+                    className={language === option.value ? "ghost-button language-choice active" : "ghost-button language-choice"}
+                    aria-pressed={language === option.value}
+                    onClick={() => setLanguage(option.value)}
+                  >
+                    <strong data-i18n-skip>{option.label}</strong>
+                    <small data-i18n-skip>{option.description}</small>
+                  </button>
+                ))}
+              </div>
+            </div>
+          </section>
+        </div>
+      </aside>
+    </div>
+  );
+}
+
 export default function App() {
   const [runtime, setRuntime] = useState<RuntimeConfigSnapshot | null>(null);
   const [runtimeDraft, setRuntimeDraft] = useState<RuntimeConfig | null>(null);
   const [runtimeNotice, setRuntimeNotice] = useState<Notice | null>(null);
   const [runtimeBusy, setRuntimeBusy] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  const [globalSettingsOpen, setGlobalSettingsOpen] = useState(false);
   const [projects, setProjects] = useState<ProjectRecord[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [summary, setSummary] = useState<ProjectSummary | null>(null);
-  const [projectName, setProjectName] = useState("STEP 工作台项目");
-  const [message, setMessage] = useState("检查当前项目状态，生成一份可审阅的工程执行计划。");
+  const [projectName, setProjectName] = useState("STEP workbench project");
+  const [message, setMessage] = useState("Check the current project status and generate a reviewable engineering execution plan.");
   const [chat, setChat] = useState<ChatResponse | null>(null);
   const [chatHistory, setChatHistory] = useState<ChatHistoryItem[]>([]);
   const [busy, setBusy] = useState(false);
@@ -2204,6 +2277,9 @@ export default function App() {
                 <div className="runtime-pill">
                   {runtimeReady ? `${runtimeProvider} 运行时已就绪` : "CAD 运行时需配置"}
                 </div>
+                <button type="button" className="ghost-button" onClick={() => setGlobalSettingsOpen(true)} aria-label="打开全局设置">
+                  全局设置
+                </button>
                 <button type="button" className="ghost-button" onClick={() => setSettingsOpen(true)}>
                   环境设置
                 </button>
@@ -2260,6 +2336,9 @@ export default function App() {
             </div>
             <button type="button" className="ghost-button compact-button" onClick={() => setSettingsOpen(true)}>
               环境
+            </button>
+            <button type="button" className="ghost-button compact-button" onClick={() => setGlobalSettingsOpen(true)}>
+              全局
             </button>
           </div>
 
@@ -3503,6 +3582,7 @@ export default function App() {
         onSave={() => void runRuntimeTask("save", () => api.updateRuntimeConfig(runtimeDraft!))}
         onRestore={restoreRuntimeDefaults}
       />
+      <GlobalSettingsDrawer open={globalSettingsOpen} onClose={() => setGlobalSettingsOpen(false)} />
     </>
   );
 }
