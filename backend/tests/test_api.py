@@ -6162,6 +6162,7 @@ def test_full_real_pipeline_step_to_summary(tmp_path: Path) -> None:
     to true and that the reported stress and displacement are non-zero
     real numbers (not synthetic placeholders).
     """
+    import math
     import subprocess  # noqa: F401  (imported for side-effect parity with helpers)
 
     from app.main import create_app, default_project, project_dir, save_project
@@ -6254,7 +6255,26 @@ def test_full_real_pipeline_step_to_summary(tmp_path: Path) -> None:
         assert "results/computed_metrics.json" in names
         solver_run_json = json.loads(zf.read("simulation/runs/run_001/solver_run.json"))
     assert solver_run_json["solver"] == "CalculiX"
-    assert solver_run_json["converged"] is None  # honest: ccx exit code is not convergence evidence
+    assert solver_run_json["converged"] is None  # honest: ccx exit code is not reliable convergence evidence
+    assert solver_run_json.get("state") in ("completed", "failed", "error")
+    assert solver_run_json.get("duration_seconds", -1) >= 0.0
+    assert isinstance(solver_run_json.get("started_at"), str) and solver_run_json["started_at"]
+    assert isinstance(solver_run_json.get("finished_at"), str) and solver_run_json["finished_at"]
+    assert solver_run_json.get("log_file", "").endswith(".txt")
+
+    # changed_artifacts references the main solver output files by suffix.
+    changed = solver_result.get("changed_artifacts", [])
+    assert any(str(a.get("path", "")).endswith(".frd") for a in changed), (
+        "solver changed_artifacts must include a .frd entry"
+    )
+    assert any(str(a.get("path", "")).endswith("solver_run.json") for a in changed), (
+        "solver changed_artifacts must include a solver_run.json entry"
+    )
+
+    # FRD extraction produced structured metrics in the tool result (extract_results=True).
+    extracted = solver_result.get("extracted_metrics")
+    assert isinstance(extracted, dict), "extracted_metrics must be a dict when extract_results=True"
+    assert "max_displacement" in extracted or "max_von_mises_stress" in extracted
 
     # 6. postprocess.refresh_cae_summary -- regenerates result_summary.json,
     #    evidence_index.json, and postprocessing_summary.md from the real metrics.
@@ -6269,20 +6289,57 @@ def test_full_real_pipeline_step_to_summary(tmp_path: Path) -> None:
     assert refresh_resp.status_code == 200
     refresh_data = refresh_resp.json()
     assert refresh_data["status"] == "completed", f"Summary refresh failed: {refresh_data}"
+    refresh_output = refresh_data["tool_results"][0]["output"]
+    assert refresh_output["status"] == "ok"
+    assert refresh_output.get("schema_version")  # non-empty version string
+    refresh_artifact_paths = {a["path"] for a in refresh_output.get("artifacts", [])}
+    assert "results/result_summary.json" in refresh_artifact_paths
+    assert "results/evidence_index.json" in refresh_artifact_paths
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        post_refresh_names = set(zf.namelist())
+    assert "results/result_summary.json" in post_refresh_names
+    assert "results/evidence_index.json" in post_refresh_names
 
     # 7. Final assertions on real numerical output served by the API.
     sum_resp = client.get(f"/api/projects/{project_id}/cae-result-summary")
     assert sum_resp.status_code == 200
     summary = sum_resp.json()
     cv = summary["computed_values"]
+
+    # 7a. Metrics are structured and finite.
     assert cv["extrema_computed"] is True
     assert cv["max_displacement"] is not None
-    assert cv["max_displacement"]["value"] > 0.0
     assert cv["max_von_mises_stress"] is not None
-    assert cv["max_von_mises_stress"]["value"] > 0.0
-    # Generous sanity bounds for a 10x1x1 mm steel cube under -100 N tip load:
-    # analytic tip deflection ~ FL^3/(3EI) ~ 0.06 mm; max stress ~ 6 MPa.
-    # Bounds intentionally loose to tolerate mesh-density and bc-distribution effects.
-    assert cv["max_displacement"]["value"] < 5.0           # mm
-    assert cv["max_von_mises_stress"]["value"] < 1.0e5     # MPa
+    disp_val = cv["max_displacement"]["value"]
+    stress_val = cv["max_von_mises_stress"]["value"]
+    assert math.isfinite(disp_val), f"displacement must be finite, got {disp_val}"
+    assert math.isfinite(stress_val), f"von Mises stress must be finite, got {stress_val}"
+    assert disp_val > 0.0
+    assert stress_val > 0.0
+    # Generous sanity bounds for a 10x1x1 mm steel cube under -100 N tip load.
+    # Analytic tip deflection ~FL^3/(3EI) ~0.06 mm; max stress ~6 MPa.
+    # Bounds intentionally loose to tolerate mesh-density and BC-distribution effects.
+    assert disp_val < 5.0           # mm
+    assert stress_val < 1.0e5       # MPa
+    assert cv["max_displacement"].get("unit") == "mm"
+    assert cv["max_von_mises_stress"].get("unit") == "MPa"
+    assert cv.get("source") == "results/computed_metrics.json"
+    assert cv.get("computed_by")  # non-empty: set by frd_result_extractor
+
+    # 7b. Summary structure and artifact references are sane.
+    assert summary.get("schema_version")  # non-empty version string
+    assert summary.get("summary_type") == "cae_postprocessing"
+    assert summary["status"]["has_results"] is True
+    assert summary["status"]["converged"] is None  # honest: ccx exit code is not convergence evidence
+    assert "results/result_summary.json" in summary["artifacts"]["result_summary_files"]
+    assert "results/evidence_index.json" in summary["artifacts"]["evidence_files"]
+    assert summary["llm_summary"].get("one_line")  # non-empty
     assert len(summary["llm_summary"]["limitations"]) > 0
+
+    # 7c. Claims are not automatically advanced.
+    # This smoke test verifies evidence production only.  Solver output, artifacts,
+    # and metrics are evidence; engineering claims require an explicit claim-update
+    # workflow.  Neither run_solver nor refresh_cae_summary writes ai/claim_map.json.
+    with zipfile.ZipFile(pkg_path, "r") as zf:
+        final_names = set(zf.namelist())
+    assert "ai/claim_map.json" not in final_names
